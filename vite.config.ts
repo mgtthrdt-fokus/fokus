@@ -11,7 +11,10 @@ const CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 's
   "connect-src 'self' https://api.github.com; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const csp: Plugin = {
   name: "csp", apply: "build",
-  transformIndexHtml: html => html.replace("<head>", `<head>\n<meta http-equiv="Content-Security-Policy" content="${CSP}">`),
+  transformIndexHtml: html => {
+    if (!html.includes("<head>")) throw new Error("CSP: <head> not found, refusing to build without CSP");
+    return html.replace("<head>", `<head>\n<meta http-equiv="Content-Security-Policy" content="${CSP}">`);
+  },
 };
 
 export default defineConfig({

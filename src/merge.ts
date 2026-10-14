@@ -1,15 +1,43 @@
-import { INBOX, emptyFile, ts, type FNode, type FileV2 } from "./model.ts";
+import { INBOX, STATUSES, emptyFile, now, ts, type FNode, type FileV2 } from "./model.ts";
 import { migrate, type AreaMap } from "./migrate.ts";
 
+const TYPES = ["area", "project", "package", "task", "note", "meeting", "system"];
+const STR = ["body", "waitingOn", "short", "series", "attendees", "when", "resume", "meeting", "prev"];
+const DATE = ["due", "start", "done", "focus", "reviewed", "date"];
+const NUM = ["est", "act"];
+const EPOCH = "1970-01-01T00:00:00.000Z";
+const future = (s: string) => ts(s) > Date.now() + 864e5;   // a wrong clock or edited file must not win every merge forever
+/** One node from outside (GitHub, import, fokus.py): wrong types would crash rendering on every start. */
+function clean(n: any): FNode {
+  const o: any = { ...n, title: String(n.title ?? ""), parent: typeof n.parent === "string" ? n.parent : null, rank: typeof n.rank === "string" ? n.rank : "a0" };
+  for (const k of STR) if (o[k] != null && typeof o[k] !== "string") o[k] = String(o[k]);
+  for (const k of DATE) if (o[k] != null && !(typeof o[k] === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o[k]))) delete o[k];
+  for (const k of NUM) if (o[k] != null && !(typeof o[k] === "number" && isFinite(o[k]) && o[k] >= 0)) delete o[k];
+  if (o.status != null && !STATUSES.includes(o.status)) o.status = "next";
+  if (o.priority != null && ![1, 2, 3].includes(o.priority)) delete o.priority;
+  if (o.state != null && o.state !== "active" && o.state !== "holding") delete o.state;
+  if (o.color != null && !/^#[0-9a-f]{3,8}$/i.test(o.color)) delete o.color;
+  for (const k of ["archived", "proposed"]) if (o[k] != null && typeof o[k] !== "boolean") o[k] = !!o[k];
+  for (const k of ["created", "updated", "touched"]) {
+    if (k === "touched" && o[k] == null) continue;
+    if (typeof o[k] !== "string" || !ts(o[k])) o[k] = EPOCH;   // unknown age: loses every merge instead of winning
+    else if (future(o[k])) o[k] = now();
+  }
+  return o;
+}
 const byId = (a: FNode, b: FNode) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 /** Any parsed file (v1, v2 or junk) → valid v2. */
 export function normalize(d: any, areas?: AreaMap[]): FileV2 {
   if (!d || typeof d !== "object") return emptyFile();
   if (d.schema !== 2) return migrate(d, areas);
-  const nodes: FNode[] = Array.isArray(d.nodes) ? d.nodes.filter((n: any) => n && typeof n.id === "string" && typeof n.type === "string") : [];
+  // Trust boundary (import, GitHub, Claude's CLI): coerce what the UI renders or feeds into CSS.
+  const nodes: FNode[] = (Array.isArray(d.nodes) ? d.nodes : [])
+    .filter((n: any) => n && typeof n.id === "string" && /^[\w-]{1,64}$/.test(n.id) && TYPES.includes(n.type))
+    .map(clean);
   if (!nodes.some(n => n.id === INBOX)) nodes.push(emptyFile().nodes[0]);
-  const deleted = d.deleted && typeof d.deleted === "object" ? d.deleted : {};
+  const deleted: Record<string, string> = {};
+  if (d.deleted && typeof d.deleted === "object") for (const [k, v] of Object.entries(d.deleted)) if (typeof v === "string") deleted[k] = future(v) ? now() : v;
   return guard({ schema: 2, nodes, deleted });
 }
 

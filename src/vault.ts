@@ -14,13 +14,26 @@ export async function deriveKey(pass: string, salt: string, iter = ITER, extract
     base, { name: "AES-GCM", length: 256 }, extractable, ["encrypt", "decrypt"]);
 }
 
-export async function makeVault(token: string, pass: string): Promise<Vault> {
+/** dataSalt: pass the old vault's value on a token renewal, otherwise the data key changes and data.json is unreadable. */
+export async function makeVault(token: string, pass: string, dataSalt?: string): Promise<Vault> {
   const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(pass, salt);
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(token)));
-  // dataSalt is reserved for the later data-E2E key, so token key and data key differ.
-  return { v: 1, iter: ITER, salt, iv: b64(iv), ct: b64(ct), dataSalt: b64(crypto.getRandomValues(new Uint8Array(16))) };
+  // separate salt for the data key, so token key and data key differ
+  return { v: 1, iter: ITER, salt, iv: b64(iv), ct: b64(ct), dataSalt: dataSalt ?? b64(crypto.getRandomValues(new Uint8Array(16))) };
+}
+
+/** Encrypted data.json: {"schema":2,"enc":{v,salt,iter,iv,ct}}. ct = AES-GCM ciphertext with the 16-byte tag
+ *  appended (WebCrypto layout, same as Python cryptography's AESGCM), so tools/fokus.py can read it. */
+export interface Enc { v: 1; salt: string; iter: number; iv: string; ct: string }
+export async function encryptData(text: string, key: CryptoKey, salt: string, iter = ITER): Promise<Enc> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(text)));
+  return { v: 1, salt, iter, iv: b64(iv), ct: b64(ct) };
+}
+export async function decryptData(e: Enc, key: CryptoKey): Promise<string> {
+  return dec.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(e.iv) }, key, unb64(e.ct)));
 }
 
 /** Throws on a wrong passphrase (AES-GCM authentication fails). */

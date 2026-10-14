@@ -1,12 +1,26 @@
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import type { JSX } from "preact";
-import { INBOX, STATUSES, isActionable, isOpen, type FNode, type NodeType, type Status } from "./model.ts";
+import type { ComponentChildren, JSX } from "preact";
+import { INBOX, STATUSES, isActionable, isOpen, today, type FNode, type NodeType, type Status } from "./model.ts";
 import { S, add, getTree, indent, moveBy, outdent, remove, setStatus, setUi, toggleDone, update } from "./store.ts";
 import type { Tree } from "./tree.ts";
 import { fmtDue, hours, isOverdue, overdueDays } from "./fmt.ts";
 import { byRank } from "./rank.ts";
+import { liveTasks } from "./today.ts";
 
-export const go = (id: string | null, focus = false) => { location.hash = id ? `#/n/${id}${focus ? "?f" : ""}` : focus ? "#/?f" : "#/"; };
+export type View = "outline" | "today" | "board" | "meetings" | "review";
+export interface Route { id: string | null; v: View; f: boolean }
+export function parseHash(h = location.hash): Route {
+  const m = h.match(/^#\/(?:n\/([\w-]{1,64}))?(?:\?(.*))?$/), q = new URLSearchParams(m?.[2] ?? "");
+  const v = q.get("v") as View;
+  return { id: m?.[1] ?? null, v: ["today", "board", "meetings", "review"].includes(v) ? v : "outline", f: q.has("f") };
+}
+export const href = (r: Route) => {
+  const q = [r.v !== "outline" ? "v=" + r.v : "", r.f ? "f" : ""].filter(Boolean).join("&");
+  return "#/" + (r.id ? "n/" + r.id : "") + (q ? "?" + q : "");
+};
+export const nav = (p: Partial<Route>) => { location.hash = href({ ...parseHash(), ...p }); };
+/** Zoom keeps the view, except Heute/Rückblick, which ignore zoom; there zooming opens the outline. */
+export const go = (id: string | null) => { const r = parseHash(); nav({ id, v: r.v === "today" || r.v === "review" ? "outline" : r.v }); };
 
 /* ---------- focus handoff across re-renders ---------- */
 let pending: { id: string; caret: number | "end" } | null = null;
@@ -28,7 +42,7 @@ function placeCaret(el: HTMLElement, pos: number | "end") {
 const titles = () => [...document.querySelectorAll<HTMLElement>("[data-title]")];
 
 /* ---------- editable title (uncontrolled while focused, so the caret never jumps) ---------- */
-export function Title({ n, root, tag = "span", class: cls = "title" }: { n: FNode; root: string | null; tag?: "span" | "h1"; class?: string }) {
+export function Title({ n, root, tag = "span", class: cls = "title", flat = false }: { n: FNode; root: string | null; tag?: "span" | "h1"; class?: string; flat?: boolean }) {
   const ref = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const el = ref.current!;
@@ -44,6 +58,10 @@ export function Title({ n, root, tag = "span", class: cls = "title" }: { n: FNod
     const el = ref.current!, mod = e.ctrlKey || e.metaKey, tree = getTree();
     const isRoot = n.id === root;
     if (e.key === "Enter" && mod) { e.preventDefault(); if (isActionable(n)) toggleDone(n.id); return; }
+    if (mod && e.key.toLowerCase() === "i") { e.preventDefault(); setUi({ sel: S.sel === n.id ? null : n.id }); return; }
+    // cards (Heute, Board …) have no tree around them: Enter/Esc only commit
+    if (flat && (e.key === "Enter" || e.key === "Escape")) { e.preventDefault(); el.blur(); return; }
+    if (flat && e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       if (isRoot) { const id = add(n.id, null); focusTitle(id, 0); return; }
@@ -75,7 +93,7 @@ export function Title({ n, root, tag = "span", class: cls = "title" }: { n: FNod
   const Tag = tag as any;
   return <Tag ref={ref} class={cls} data-title={n.id} contentEditable={n.id === INBOX ? false : "plaintext-only"} spellcheck={false}
     role="textbox" aria-label="Titel" onInput={onInput} onKeyDown={onKey}
-    onFocus={() => { editingId = n.id; }} onBlur={() => { if (editingId === n.id) editingId = null; }} />;
+    onFocus={() => { editingId = n.id; if (S.sel && S.sel !== n.id) setUi({ sel: n.id }); }} onBlur={() => { if (editingId === n.id) editingId = null; }} />;
 }
 
 /* ---------- row menu (right-click / long-press on bullet / Ctrl+/) ---------- */
@@ -100,6 +118,7 @@ export function RowMenu() {
     <div class="menu" role="menu" ref={box} style={{ left: Math.max(8, x) + "px", top: Math.max(8, y) + "px" }}
       onKeyDown={e => { if (e.key === "Escape") close(); }}>
       <button role="menuitem" onClick={act(() => go(n.id))}>Hineinzoomen</button>
+      <button role="menuitem" onClick={act(() => setUi({ sel: n.id }))}>Details</button>
       {n.id !== INBOX && <>
         <div class="h">Typ</div>
         {TYPES.map(([t, name]) => <button role="menuitemradio" aria-checked={n.type === t} onClick={act(() => setType(t))}>{name}</button>)}
@@ -119,7 +138,7 @@ export function RowMenu() {
 }
 
 /* ---------- rows ---------- */
-function Chips({ n, t, showRollup }: { n: FNode; t: Tree; showRollup: boolean }) {
+export function Chips({ n, t, showRollup }: { n: FNode; t: Tree; showRollup: boolean }) {
   const c: JSX.Element[] = [];
   if (isActionable(n) && isOpen(n)) {
     if (n.status === "waiting") c.push(<span class="wt">⏳ {n.waitingOn || "wartet"}</span>);
@@ -127,7 +146,9 @@ function Chips({ n, t, showRollup }: { n: FNode; t: Tree; showRollup: boolean })
     if (n.due) c.push(isOverdue(n.due) && n.status !== "waiting" ? <span class="od">⚠ {overdueDays(n.due)} T überfällig</span> : <span>→ {fmtDue(n.due)}</span>);
     if (n.est) c.push(<span>{hours(Number(n.est))}</span>);
   }
-  if (n.proposed) c.push(<span class="nx">Vorschlag</span>);
+  if (n.proposed) c.push(<span class="prop">Vorschlag von Claude
+    <button onClick={() => update(n.id, { proposed: undefined })} aria-label="Vorschlag annehmen">✓ annehmen</button>
+    <button onClick={() => remove(n.id)} aria-label="Vorschlag verwerfen">✕</button></span>);
   if (n.archived) c.push(<span>archiviert</span>);
   if (showRollup) {
     const r = t.rollup(n.id);
@@ -194,7 +215,7 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
             onClick={() => kids && (lvl >= S.depth && !open ? go(n.id) : setUi({ toggle: n.id }))}>{kids ? <Caret /> : null}</button>
           <Bullet n={n} more={kids > 0 && !open} />
           {act && <span class="check"><button role="checkbox" aria-checked={n.status === "done"} aria-label="Erledigt" onClick={() => toggleDone(n.id)}>
-            {n.status === "done" && <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.6 9.5 3.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>}
+            {n.status === "done" && <Tick />}
           </button></span>}
           <span class="body">
             <Title n={n} root={root} />
@@ -209,22 +230,35 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
   </>;
 }
 
+/* ---------- card: task row for Heute, Board, Rückblick, Meetings, Fokus ---------- */
+export function Card({ n, t, path = true, extra, drag, root = null }: { n: FNode; t: Tree; path?: boolean; extra?: ComponentChildren; drag?: boolean; root?: string | null }) {
+  // touch swipe: right = done, left = later (HANDOVER §3.6)
+  const x0 = useRef<number | null>(null), [dx, setDx] = useState(0);
+  const down = (e: PointerEvent) => { if (e.pointerType === "touch") x0.current = e.clientX; };
+  const move = (e: PointerEvent) => { if (x0.current != null) setDx(Math.max(-120, Math.min(120, e.clientX - x0.current))); };
+  const up = () => { if (dx > 80) toggleDone(n.id); else if (dx < -80) setStatus(n.id, "later"); x0.current = null; setDx(0); };
+  return <li class="row card" data-t={n.type} data-done={n.status === "done" || undefined} data-prop={n.proposed || undefined}
+    data-swipe={dx > 80 ? "done" : dx < -80 ? "later" : undefined}
+    style={{ "--lvl": 0, transform: dx ? `translateX(${dx}px)` : "" } as any}
+    onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { x0.current = null; setDx(0); }}
+    draggable={drag} onDragStart={drag ? e => e.dataTransfer?.setData("text/plain", n.id) : undefined}
+    onContextMenu={e => { e.preventDefault(); openMenu(n.id, e.clientX, e.clientY); }}>
+    <span class="check"><button role="checkbox" aria-checked={n.status === "done"} aria-label="Erledigt" onClick={() => toggleDone(n.id)}>
+      {n.status === "done" && <Tick />}</button></span>
+    <span class="body">
+      {path && <span class="path">{t.path(n.parent).slice(t.path(root).length).map(p => p.title).join(" › ") || "\u00a0"}</span>}
+      <Title n={n} root={null} flat />
+      <Chips n={n} t={t} showRollup={false} />
+    </span>
+    {extra && <span class="extra">{extra}</span>}
+    <button class="iconbtn more" aria-label="Details" title="Details (Strg+I)" onClick={() => setUi({ sel: n.id })}>›</button>
+  </li>;
+}
+const Tick = () => <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.6 9.5 3.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>;
+
 /* ---------- focus mode: open actionable items of the zoom root, by due date ---------- */
 export function FocusList({ t, root }: { t: Tree; root: string | null }) {
-  const items: FNode[] = [];
-  const walk = (id: string | null) => { for (const n of t.kids(id)) { if (n.archived || n.state === "holding") continue; if (isActionable(n) && isOpen(n)) items.push(n); walk(n.id); } };
-  walk(root);
-  items.sort((a, b) => (a.due || "9999") < (b.due || "9999") ? -1 : (a.due || "9999") > (b.due || "9999") ? 1 : byRank(a, b));
+  const items = liveTasks(t, today(), root).sort((a, b) => (a.due || "9999") < (b.due || "9999") ? -1 : (a.due || "9999") > (b.due || "9999") ? 1 : byRank(a, b));
   if (!items.length) return <p class="empty">Nichts offen. Gut gemacht.</p>;
-  const rootDepth = t.path(root).length;
-  return <ul class="tree focuslist" role="list">
-    {items.map(n => <li key={n.id} class="row" style={{ "--lvl": 0 } as any} data-t={n.type}>
-      <span class="check"><button role="checkbox" aria-checked={false} aria-label="Erledigt" onClick={() => toggleDone(n.id)} /></span>
-      <span class="body">
-        <span class="path">{t.path(n.parent).slice(rootDepth).map(p => p.title).join(" › ") || " "}</span>
-        <Title n={n} root={root} />
-        <Chips n={n} t={t} showRollup={false} />
-      </span>
-    </li>)}
-  </ul>;
+  return <ul class="tree cards" role="list">{items.map(n => <Card key={n.id} n={n} t={t} root={root} />)}</ul>;
 }

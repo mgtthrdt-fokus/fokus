@@ -3,9 +3,10 @@ import { INBOX, emptyFile, now, today, uid, type FNode, type FileV2, type NodeTy
 import { merge, normalize, serialize } from "./merge.ts";
 import { rankBetween } from "./rank.ts";
 import { buildTree, type Tree } from "./tree.ts";
-import { deriveKey, openVault, type Vault } from "./vault.ts";
+import { findProject, parseQuick } from "./parse.ts";
+import { decryptData, deriveKey, encryptData, openVault, type Vault } from "./vault.ts";
 
-export const REPO = { owner: "mgtthrdt", repo: "fokus-data", path: "data.json", backup: "data.v1.json", branch: "main" };
+export const REPO = { owner: "mgtthrdt", repo: "fokus-data", path: "data.json", branch: "main" };
 
 /* ---------- local persistence (keys fk2_*, v1 used fk_*) ---------- */
 const LS = {
@@ -20,6 +21,9 @@ function initialFile(): FileV2 {
   const v1 = LS.get<any>("fk_data", null);   // a device that used v1 locally keeps its data
   return v1 ? normalize(v1) : emptyFile();
 }
+// v1 kept its GitHub token in plaintext (fk_cfg) on the shared origin: never leave it behind
+const V1_KEYS = ["fk_data", "fk_cfg", "fk_sha", "fk_dirty", "fk_last", "fk_view", "fk_filter"];
+function dropV1() { if (LS.get("fk2_data", null)) V1_KEYS.forEach(LS.del); }   // only once v2 holds the data
 
 export type SyncState = "off" | "locked" | "idle" | "syncing" | "error" | "offline";
 export const S = {
@@ -30,9 +34,12 @@ export const S = {
   sync: "off" as SyncState,
   err: "",
   token: null as string | null,
+  dataKey: null as CryptoKey | null,   // E2E: data.json on GitHub is only ever written encrypted
   vault: null as Vault | null,
   collapsed: new Set<string>(LS.get<string[]>("fk2_collapsed", [])),  // per device, not synced
   depth: LS.get("fk2_depth", 2),
+  sel: null as string | null,                                  // node shown in the inspector
+  palette: null as null | "search" | "new" | "move",
 };
 let tree: Tree = buildTree(S.file.nodes);
 export const getTree = () => tree;
@@ -45,13 +52,16 @@ export function useStore() {
   return tree;
 }
 
-function saveLocal() { LS.set("fk2_data", S.file); LS.set("fk2_dirty", S.dirty); LS.set("fk2_sha", S.sha); }
+function saveLocal() { LS.set("fk2_data", S.file); LS.set("fk2_dirty", S.dirty); LS.set("fk2_sha", S.sha); dropV1(); }
+saveLocal();   // first v2 start: persist migrated v1 data, then drop the v1 keys
 function commit(nodes: FNode[], deleted = S.file.deleted) {
   S.file = { schema: 2, nodes, deleted };
   tree = buildTree(nodes);
   S.dirty = true; saveLocal(); emit(); scheduleSync();
 }
-export function setUi(p: { depth?: number; toggle?: string }) {
+export function setUi(p: { depth?: number; toggle?: string; sel?: string | null; palette?: typeof S.palette }) {
+  if (p.sel !== undefined) S.sel = p.sel;
+  if (p.palette !== undefined) S.palette = p.palette;
   if (p.depth) { S.depth = p.depth; LS.set("fk2_depth", p.depth); }
   if (p.toggle) { S.collapsed.has(p.toggle) ? S.collapsed.delete(p.toggle) : S.collapsed.add(p.toggle); LS.set("fk2_collapsed", [...S.collapsed]); }
   emit();
@@ -115,6 +125,32 @@ export function toggleDone(id: string) {
     ? { ...n, status: n.prev && n.prev !== "done" ? n.prev : "next", done: null }
     : { ...n, prev: n.status ?? "next", status: "done", done: today() });
 }
+/** Quick-add. Target: >>paket under #projekt, else #projekt, else `fallback` (zoom root), else Eingang. */
+export function capture(text: string, fallback: string | null): string | null {
+  const p = parseQuick(text);
+  if (!p.title) return null;
+  const nodes = S.file.nodes;
+  let parent: string = fallback && tree.byId.has(fallback) ? fallback : INBOX;
+  if (p.project) {
+    // unknown #tag creates the project in Eingang, as v1 did, so nothing typed is lost
+    parent = findProject(nodes, p.project)?.id ?? add(INBOX, tree.kids(INBOX).at(-1)?.id ?? null, { type: "project", title: p.project, short: p.project.toLowerCase() });
+  }
+  if (p.pkg) {
+    const q = p.pkg.toLowerCase();
+    parent = tree.kids(parent).find(n => n.type === "package" && n.title.toLowerCase() === q)?.id
+      ?? add(parent, tree.kids(parent).at(-1)?.id ?? null, { type: "package", title: p.pkg });
+  }
+  const fields: Partial<FNode> = p.note ? { type: "note" } : {
+    type: "task", status: p.status ?? (parent === INBOX ? "inbox" : "next"),
+    ...(p.due ? { due: p.due } : {}), ...(p.start ? { start: p.start } : {}), ...(p.waitingOn ? { waitingOn: p.waitingOn } : {}),
+  };
+  return add(parent, tree.kids(parent).at(-1)?.id ?? null, { title: p.title, ...fields });
+}
+/** Move to the end of `parent`'s children; refuses to move a node into its own subtree. */
+export function moveTo(id: string, parent: string | null) {
+  if (isFixed(id) || id === parent || (parent && tree.path(parent).some(a => a.id === id))) return;
+  placeAt(id, parent, tree.kids(parent).filter(s => s.id !== id).length);
+}
 export function setStatus(id: string, s: Status) {
   replace(id, n => s === "done"
     ? { ...n, prev: n.status === "done" ? n.prev : n.status ?? "next", status: "done", done: n.done ?? today() }
@@ -157,6 +193,22 @@ async function ghPut(path: string, text: string, sha: string | null, msg: string
   return { sha: (await r.json()).content.sha };
 }
 
+async function readData(text: string): Promise<any> {
+  const raw = JSON.parse(text);
+  if (!raw?.enc) return raw;
+  if (!S.dataKey) throw new Error("verschlüsselt, Schlüssel fehlt");
+  return JSON.parse(await decryptData(raw.enc, S.dataKey));
+}
+async function writeData(f: FileV2): Promise<string> {
+  const plain = serialize(f);
+  if (!S.dataKey || !S.vault) throw new Error("kein Datenschlüssel");   // never write plaintext
+  return JSON.stringify({ schema: 2, enc: await encryptData(plain, S.dataKey, S.vault.dataSalt, S.vault.iter) }, null, 1) + "\n";
+}
+
+/** Export stays encrypted once a data key exists (HANDOVER §11); import accepts both forms. */
+export const exportText = () => S.dataKey ? writeData(S.file) : Promise.resolve(serialize(S.file));
+export async function importText(text: string) { replaceAll(normalize(await readData(text))); }
+
 let syncing = false, again = false, timer: ReturnType<typeof setTimeout> | undefined;
 export function scheduleSync(ms = 1500) { clearTimeout(timer); timer = setTimeout(sync, ms); }
 
@@ -170,16 +222,13 @@ export async function sync() {
     for (let attempt = 0; attempt < 4 && !ok; attempt++) {
       const before = serialize(S.file);
       const remote = await ghGet(REPO.path);
-      const raw = remote ? JSON.parse(remote.text) : null;
-      if (raw && raw.schema !== 2 && !(await ghGet(REPO.backup))) {
-        // first v2 write: keep the untouched v1 file once (HANDOVER §5.5)
-        await ghPut(REPO.backup, remote!.text, null, "Fokus: Backup schema 1 vor Migration");
-      }
+      const encrypted = remote ? !!JSON.parse(remote.text)?.enc : false;
+      const raw = remote ? await readData(remote.text) : null;
       const rdata = raw ? normalize(raw) : null;
       const merged = rdata ? merge(S.file, rdata) : S.file;
       let sha = remote?.sha ?? null;
-      if (!remote || raw.schema !== 2 || serialize(merged) !== serialize(rdata!)) {
-        const res = await ghPut(REPO.path, serialize(merged), sha, "Fokus: Update " + new Date().toLocaleString("de-AT"));
+      if (!remote || raw.schema !== 2 || !encrypted || serialize(merged) !== serialize(rdata!)) {
+        const res = await ghPut(REPO.path, await writeData(merged), sha, "Fokus: Update " + new Date().toLocaleString("de-AT"));
         if (res.conflict) continue;
         sha = res.sha!;
       }
@@ -200,7 +249,7 @@ export async function sync() {
   if (again) { again = false; scheduleSync(300); }
 }
 
-/* ---------- unlock: passphrase → key (remembered in IndexedDB, non-extractable) → token ---------- */
+/* ---------- unlock: passphrase → token key + data key (remembered in IndexedDB, non-extractable) ---------- */
 const idb = <T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest): Promise<T> => new Promise((res, rej) => {
   const o = indexedDB.open("fokus", 1);
   o.onupgradeneeded = () => o.result.createObjectStore("kv");
@@ -214,26 +263,29 @@ export async function loadVault(): Promise<void> {
     S.vault = r.ok ? await r.json() : null;
   } catch { S.vault = null; }
   if (!S.vault) { S.sync = "off"; emit(); return; }
-  const key = await idb<CryptoKey | undefined>("readonly", s => s.get("key")).catch(() => undefined);
-  if (key && await useKey(key)) return;
+  const keys = await idb<Keys | undefined>("readonly", s => s.get("keys")).catch(() => undefined);
+  if (keys && await useKeys(keys)) return;
   S.sync = "locked"; emit();
 }
-async function useKey(key: CryptoKey): Promise<boolean> {
-  try { S.token = await openVault(S.vault!, key); } catch { return false; }
+type Keys = { token: CryptoKey; data: CryptoKey };
+async function useKeys(k: Keys): Promise<boolean> {
+  try { S.token = await openVault(S.vault!, k.token); } catch { return false; }
+  S.dataKey = k.data;
   S.sync = "idle"; emit(); sync();
   return true;
 }
 /** false = wrong passphrase */
 export async function unlock(pass: string, remember: boolean): Promise<boolean> {
-  const key = await deriveKey(pass, S.vault!.salt, S.vault!.iter);
-  if (!(await useKey(key))) return false;
-  if (remember) await idb("readwrite", s => s.put(key, "key")).catch(() => {});
+  const v = S.vault!;
+  const [token, data] = await Promise.all([deriveKey(pass, v.salt, v.iter), deriveKey(pass, v.dataSalt, v.iter)]);
+  if (!(await useKeys({ token, data }))) return false;
+  if (remember) await idb("readwrite", s => s.put({ token, data }, "keys")).catch(() => {});
   return true;
 }
-/** "Gerät abmelden": forget key, token and local data on this device. */
+/** "Gerät abmelden": forget keys, token and local data on this device. */
 export async function signOut() {
-  await idb("readwrite", s => s.delete("key")).catch(() => {});
-  ["fk2_data", "fk2_sha", "fk2_dirty", "fk2_last", "fk2_collapsed", "fk_data"].forEach(LS.del);
+  await idb("readwrite", s => s.delete("keys")).catch(() => {});
+  ["fk2_data", "fk2_sha", "fk2_dirty", "fk2_last", "fk2_collapsed", ...V1_KEYS].forEach(LS.del);
   location.reload();
 }
 

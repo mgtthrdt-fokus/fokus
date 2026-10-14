@@ -142,3 +142,105 @@ describe("vault", () => {
     await expect(openVault(v, await deriveKey("falsch", v.salt))).rejects.toThrow();
   }, 20_000);
 });
+
+import { parseDate, parseQuick } from "./parse.ts";
+import { reviewView, todayView } from "./today.ts";
+import { decryptData, encryptData } from "./vault.ts";
+
+describe("quick-add parser", () => {
+  const T = "2026-10-14";   // Wednesday
+  it("parses project, package, person, dates, focus, note", () => {
+    expect(parseQuick("Angebot prüfen #nord >>Cost_Control @Firma bis fr ab mo", T)).toMatchObject({
+      title: "Angebot prüfen", project: "nord", pkg: "Cost Control", waitingOn: "Firma", due: "2026-10-16", start: "2026-10-19", status: "waiting",
+    });
+    expect(parseQuick("Idee ::note", T)).toMatchObject({ title: "Idee", note: true });
+    expect(parseQuick("Bericht morgen !", T)).toMatchObject({ title: "Bericht", due: "2026-10-15", status: "now" });
+    expect(parseQuick("Mail @ich", T).waitingOn).toBeUndefined();
+  });
+  it("dates: weekday never today, kw = Friday, d.m. rolls over the year, invalid stays text", () => {
+    expect(parseDate("mi", T)).toBe("2026-10-21");
+    expect(parseDate("kw44", T)).toBe("2026-10-30");
+    expect(parseDate("+2w", T)).toBe("2026-10-28");
+    expect(parseDate("3.1.", "2026-12-20")).toBe("2027-01-03");
+    expect(parseDate("31.2.", T)).toBeNull();
+    expect(parseQuick("Termin 31.2.", T).title).toBe("Termin 31.2.");
+  });
+});
+
+describe("Heute / Rückblick", () => {
+  const day = "2026-10-14", old = "2026-09-01T00:00:00.000Z";
+  const t = buildTree([
+    node("p", null, { type: "project", status: undefined }),
+    node("f", "p", { status: "now", est: 5 }),
+    node("f2", "p", { focus: "2026-10-14", est: 4 }),                      // picked yesterday for today
+    node("w1", "p", { status: "waiting", due: "2026-10-13", updated: "2026-10-12T00:00:00.000Z" }),            // follow-up due
+    node("w2", "p", { status: "waiting", updated: old }),                   // stale, no date → radar
+    node("o", "p", { due: "2026-10-10" }),
+    node("s", "p", { due: "2026-10-15" }),
+    node("d", "p", { start: "2026-10-20" }),                                // deferred → hidden
+    node("x", "p", { status: "done", done: day }),
+    node("q", "p", { proposed: true }),
+    node("h", null, { type: "project", status: undefined, state: "holding" }),
+    node("hx", "h", { due: "2026-10-01" }),                                 // paused project → not in Heute
+    node("i", INBOX, { status: "inbox" }),
+    node(INBOX, null, { type: "system", status: undefined }),
+  ], day);
+  const v = todayView(t, day);
+  it("sections", () => {
+    expect(v.focus.map(n => n.id)).toEqual(["f", "f2"]);
+    expect(v.follow.map(n => n.id).sort()).toEqual(["w1", "w2"]);
+    expect(v.overdue.map(n => n.id)).toEqual(["o"]);
+    expect(v.soon.map(n => n.id)).toEqual(["s"]);
+    expect(v.doneToday.map(n => n.id)).toEqual(["x"]);
+    expect(v.proposed.map(n => n.id)).toEqual(["q"]);
+    expect(v.inbox).toBe(1);
+    expect(v.focusHours).toBe(9);
+    const shown = [...v.focus, ...v.follow, ...v.overdue, ...v.soon, ...v.week].map(n => n.id);
+    expect(shown).not.toContain("d");
+    expect(shown).not.toContain("hx");
+  });
+  it("review lists stale and paused", () => {
+    const r = reviewView(t, day);
+    expect(r.staleWaiting.map(n => n.id)).toEqual(["w2"]);
+    expect(r.holding.map(n => n.id)).toEqual(["h"]);
+    expect(r.unreviewed.map(n => n.id)).toEqual(["p"]);
+  });
+});
+
+describe("data encryption", () => {
+  it("round-trips and fails with the wrong key", async () => {
+    const k = await deriveKey("pass eins zwei drei", "AAAAAAAAAAAAAAAAAAAAAA==");
+    const e = await encryptData("Größe €", k, "AAAAAAAAAAAAAAAAAAAAAA==");
+    expect(await decryptData(e, k)).toBe("Größe €");
+    await expect(decryptData(e, await deriveKey("falsch", "AAAAAAAAAAAAAAAAAAAAAA=="))).rejects.toThrow();
+  }, 20_000);
+});
+
+describe("normalize at the trust boundary", () => {
+  it("drops bad ids/types, coerces titles, strips CSS-unsafe colors", () => {
+    const f = normalize({ schema: 2, deleted: {}, nodes: [
+      { id: "a", type: "project", title: 5, color: "red;background:url(x)", parent: null, rank: "a0", created: "", updated: "" },
+      { id: "../x", type: "task", title: "bad id" }, { id: "b", type: "evil", title: "bad type" },
+    ] });
+    expect(f.nodes.map(n => n.id).sort()).toEqual(["a", INBOX]);
+    expect(get(f, "a").title).toBe("5");
+    expect(get(f, "a").color).toBeUndefined();
+  });
+  it("wrong field types cannot crash rendering; future or missing timestamps cannot win merges", () => {
+    const f = normalize({ schema: 2, deleted: { z: "9999-01-01T00:00:00.000Z" }, nodes: [
+      { id: "x", type: "task", title: "t", due: 20261017, body: { a: 1 }, est: "2", status: "bogus", priority: 7, proposed: "yes", updated: "9999-01-01T00:00:00.000Z" },
+      { id: "y", type: "task", title: "u" },
+    ] });
+    const x = get(f, "x"), y = get(f, "y");
+    expect(x.due).toBeUndefined();
+    expect(typeof x.body).toBe("string");
+    expect(x.est).toBeUndefined();
+    expect(x.status).toBe("next");
+    expect(x.priority).toBeUndefined();
+    expect(x.proposed).toBe(true);
+    expect(Date.parse(x.updated)).toBeLessThan(Date.now() + 864e5);
+    expect(f.deleted.z < "9999").toBe(true);
+    expect(y.updated).toBe("1970-01-01T00:00:00.000Z");
+    expect(y.touched).toBeUndefined();
+  });
+});
