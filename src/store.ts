@@ -1,0 +1,243 @@
+import { useEffect, useState } from "preact/hooks";
+import { INBOX, emptyFile, now, today, uid, type FNode, type FileV2, type NodeType, type Status } from "./model.ts";
+import { merge, normalize, serialize } from "./merge.ts";
+import { rankBetween } from "./rank.ts";
+import { buildTree, type Tree } from "./tree.ts";
+import { deriveKey, openVault, type Vault } from "./vault.ts";
+
+export const REPO = { owner: "mgtthrdt", repo: "fokus-data", path: "data.json", backup: "data.v1.json", branch: "main" };
+
+/* ---------- local persistence (keys fk2_*, v1 used fk_*) ---------- */
+const LS = {
+  get<T>(k: string, d: T): T { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k: string, v: unknown) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* quota or private mode */ } },
+  del(k: string) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+};
+
+function initialFile(): FileV2 {
+  const v2 = LS.get<any>("fk2_data", null);
+  if (v2) return normalize(v2);
+  const v1 = LS.get<any>("fk_data", null);   // a device that used v1 locally keeps its data
+  return v1 ? normalize(v1) : emptyFile();
+}
+
+export type SyncState = "off" | "locked" | "idle" | "syncing" | "error" | "offline";
+export const S = {
+  file: initialFile(),
+  sha: LS.get<string | null>("fk2_sha", null),
+  dirty: LS.get("fk2_dirty", false),
+  lastSync: LS.get<string | null>("fk2_last", null),
+  sync: "off" as SyncState,
+  err: "",
+  token: null as string | null,
+  vault: null as Vault | null,
+  collapsed: new Set<string>(LS.get<string[]>("fk2_collapsed", [])),  // per device, not synced
+  depth: LS.get("fk2_depth", 2),
+};
+let tree: Tree = buildTree(S.file.nodes);
+export const getTree = () => tree;
+
+const subs = new Set<() => void>();
+function emit() { subs.forEach(f => f()); }
+export function useStore() {
+  const [, set] = useState(0);
+  useEffect(() => { const f = () => set(x => x + 1); subs.add(f); return () => { subs.delete(f); }; }, []);
+  return tree;
+}
+
+function saveLocal() { LS.set("fk2_data", S.file); LS.set("fk2_dirty", S.dirty); LS.set("fk2_sha", S.sha); }
+function commit(nodes: FNode[], deleted = S.file.deleted) {
+  S.file = { schema: 2, nodes, deleted };
+  tree = buildTree(nodes);
+  S.dirty = true; saveLocal(); emit(); scheduleSync();
+}
+export function setUi(p: { depth?: number; toggle?: string }) {
+  if (p.depth) { S.depth = p.depth; LS.set("fk2_depth", p.depth); }
+  if (p.toggle) { S.collapsed.has(p.toggle) ? S.collapsed.delete(p.toggle) : S.collapsed.add(p.toggle); LS.set("fk2_collapsed", [...S.collapsed]); }
+  emit();
+}
+
+/* ---------- edits ---------- */
+const stamp = (n: FNode): FNode => { const t = now(); return { ...n, updated: t, touched: t }; };
+const replace = (id: string, f: (n: FNode) => FNode) => commit(S.file.nodes.map(n => n.id === id ? stamp(f(n)) : n));
+
+export const update = (id: string, patch: Partial<FNode>) => replace(id, n => ({ ...n, ...patch }));
+
+const childType: Record<NodeType, NodeType> = { area: "project", project: "task", package: "task", task: "task", note: "note", meeting: "task", system: "task" };
+
+/** New node directly after `after` (or first child of `parent` when after is null). */
+export function add(parent: string | null, after: string | null, p: Partial<FNode> = {}): string {
+  const sibs = tree.kids(parent);
+  const i = after ? sibs.findIndex(s => s.id === after) : -1;
+  const ref = after ? tree.byId.get(after) : undefined;
+  const parentNode = parent ? tree.byId.get(parent) : undefined;
+  // a sibling copies its neighbour's type, except after a meeting or Eingang (then the parent's default)
+  const type: NodeType = p.type ?? (ref && ref.type !== "system" && ref.type !== "meeting" ? ref.type : parentNode ? childType[parentNode.type] : "area");
+  const t = now();
+  const n: FNode = {
+    id: uid(type === "task" ? "t" : type[0]), type, parent, rank: rankBetween(sibs[i]?.rank, sibs[i + 1]?.rank),
+    title: "", created: t, updated: t, touched: t,
+    ...(type === "task" ? { status: "next" as const } : {}), ...p,
+  };
+  commit([...S.file.nodes, n]);
+  return n.id;
+}
+
+function placeAt(id: string, parent: string | null, index: number) {
+  const sibs = tree.kids(parent).filter(s => s.id !== id);
+  const rank = rankBetween(sibs[index - 1]?.rank, sibs[index]?.rank);
+  replace(id, n => ({ ...n, parent, rank }));
+}
+const isFixed = (id: string) => id === INBOX;
+
+export function indent(id: string) {
+  const n = tree.byId.get(id); if (!n || isFixed(id)) return;
+  const sibs = tree.kids(n.parent), i = sibs.findIndex(s => s.id === id);
+  if (i <= 0) return;
+  const newParent = sibs[i - 1];
+  if (S.collapsed.has(newParent.id)) setUi({ toggle: newParent.id });
+  placeAt(id, newParent.id, tree.kids(newParent.id).length);
+}
+export function outdent(id: string, root: string | null) {
+  const n = tree.byId.get(id); if (!n || !n.parent || n.parent === root || isFixed(id)) return;
+  const parent = tree.byId.get(n.parent)!;
+  const sibs = tree.kids(parent.parent);
+  placeAt(id, parent.parent, sibs.findIndex(s => s.id === parent.id) + 1);
+}
+export function moveBy(id: string, dir: -1 | 1) {
+  const n = tree.byId.get(id); if (!n || isFixed(id)) return;
+  const sibs = tree.kids(n.parent), i = sibs.findIndex(s => s.id === id), j = i + dir;
+  if (j < 0 || j >= sibs.length) return;
+  placeAt(id, n.parent, j);  // without n in the list, index j lands right before (up) / after (down) the neighbour
+}
+export function toggleDone(id: string) {
+  replace(id, n => n.status === "done"
+    ? { ...n, status: n.prev && n.prev !== "done" ? n.prev : "next", done: null }
+    : { ...n, prev: n.status ?? "next", status: "done", done: today() });
+}
+export function setStatus(id: string, s: Status) {
+  replace(id, n => s === "done"
+    ? { ...n, prev: n.status === "done" ? n.prev : n.status ?? "next", status: "done", done: n.done ?? today() }
+    : { ...n, status: s, done: null });
+}
+/** Removes the node and its whole subtree, with tombstones so the deletion syncs. */
+export function remove(id: string) {
+  if (isFixed(id)) return;
+  const gone = new Set<string>();
+  const walk = (x: string) => { gone.add(x); tree.kids(x).forEach(c => walk(c.id)); };
+  walk(id);
+  const t = now(), deleted = { ...S.file.deleted };
+  gone.forEach(g => deleted[g] = t);
+  commit(S.file.nodes.filter(n => !gone.has(n.id)), deleted);
+}
+export function replaceAll(f: FileV2) { commit(normalize(f).nodes, f.deleted); }
+
+/* ---------- GitHub sync (v1 algorithm on schema 2) ---------- */
+const b64enc = (s: string) => { const b = new TextEncoder().encode(s); let r = ""; for (let i = 0; i < b.length; i += 0x8000) r += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(r); };
+const b64dec = (s: string) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), c => c.charCodeAt(0)));
+const api = (path: string) => `https://api.github.com/repos/${REPO.owner}/${REPO.repo}/contents/${path}`;
+const hdr = (): Record<string, string> => ({ Authorization: "Bearer " + S.token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" });
+
+async function ghGet(path: string): Promise<{ text: string; sha: string } | null> {
+  const r = await fetch(api(path) + "?ref=" + REPO.branch + "&t=" + Date.now(), { headers: hdr(), cache: "no-store" });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error("GET " + r.status);
+  const j = await r.json();
+  if (j.content && j.encoding === "base64") return { text: b64dec(j.content), sha: j.sha };
+  const r2 = await fetch(api(path) + "?ref=" + REPO.branch, { headers: { ...hdr(), Accept: "application/vnd.github.raw+json" }, cache: "no-store" });
+  if (!r2.ok) throw new Error("RAW " + r2.status);
+  return { text: await r2.text(), sha: j.sha };   // > 1 MB: contents API omits the body
+}
+async function ghPut(path: string, text: string, sha: string | null, msg: string): Promise<{ sha?: string; conflict?: true }> {
+  const body: Record<string, string> = { message: msg, content: b64enc(text), branch: REPO.branch };
+  if (sha) body.sha = sha;
+  const r = await fetch(api(path), { method: "PUT", headers: { ...hdr(), "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 409 || r.status === 422) return { conflict: true };
+  if (!r.ok) throw new Error("PUT " + r.status);
+  return { sha: (await r.json()).content.sha };
+}
+
+let syncing = false, again = false, timer: ReturnType<typeof setTimeout> | undefined;
+export function scheduleSync(ms = 1500) { clearTimeout(timer); timer = setTimeout(sync, ms); }
+
+export async function sync() {
+  if (!S.token) return;
+  if (!navigator.onLine) { S.sync = "offline"; emit(); return; }
+  if (syncing) { again = true; return; }
+  syncing = true; S.sync = "syncing"; S.err = ""; emit();
+  try {
+    let ok = false;
+    for (let attempt = 0; attempt < 4 && !ok; attempt++) {
+      const before = serialize(S.file);
+      const remote = await ghGet(REPO.path);
+      const raw = remote ? JSON.parse(remote.text) : null;
+      if (raw && raw.schema !== 2 && !(await ghGet(REPO.backup))) {
+        // first v2 write: keep the untouched v1 file once (HANDOVER §5.5)
+        await ghPut(REPO.backup, remote!.text, null, "Fokus: Backup schema 1 vor Migration");
+      }
+      const rdata = raw ? normalize(raw) : null;
+      const merged = rdata ? merge(S.file, rdata) : S.file;
+      let sha = remote?.sha ?? null;
+      if (!remote || raw.schema !== 2 || serialize(merged) !== serialize(rdata!)) {
+        const res = await ghPut(REPO.path, serialize(merged), sha, "Fokus: Update " + new Date().toLocaleString("de-AT"));
+        if (res.conflict) continue;
+        sha = res.sha!;
+      }
+      S.sha = sha;
+      // edits made while the request was in flight must survive
+      if (serialize(S.file) !== before) { S.file = merge(S.file, merged); S.dirty = true; again = true; }
+      else { S.file = merged; S.dirty = false; }
+      tree = buildTree(S.file.nodes);
+      ok = true;
+    }
+    if (!ok) throw new Error("Konflikt (409)");
+    S.lastSync = now(); LS.set("fk2_last", S.lastSync); S.sync = "idle";
+  } catch (e: any) {
+    S.sync = "error";
+    S.err = /40[13]/.test(e.message) ? "Token ungültig oder abgelaufen" : /404/.test(e.message) ? "Repo nicht gefunden" : "Fehler (" + e.message + ")";
+  }
+  syncing = false; saveLocal(); emit();
+  if (again) { again = false; scheduleSync(300); }
+}
+
+/* ---------- unlock: passphrase → key (remembered in IndexedDB, non-extractable) → token ---------- */
+const idb = <T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest): Promise<T> => new Promise((res, rej) => {
+  const o = indexedDB.open("fokus", 1);
+  o.onupgradeneeded = () => o.result.createObjectStore("kv");
+  o.onerror = () => rej(o.error);
+  o.onsuccess = () => { const r = f(o.result.transaction("kv", mode).objectStore("kv")); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); };
+});
+
+export async function loadVault(): Promise<void> {
+  try {
+    const r = await fetch("vault.json", { cache: "no-cache" });
+    S.vault = r.ok ? await r.json() : null;
+  } catch { S.vault = null; }
+  if (!S.vault) { S.sync = "off"; emit(); return; }
+  const key = await idb<CryptoKey | undefined>("readonly", s => s.get("key")).catch(() => undefined);
+  if (key && await useKey(key)) return;
+  S.sync = "locked"; emit();
+}
+async function useKey(key: CryptoKey): Promise<boolean> {
+  try { S.token = await openVault(S.vault!, key); } catch { return false; }
+  S.sync = "idle"; emit(); sync();
+  return true;
+}
+/** false = wrong passphrase */
+export async function unlock(pass: string, remember: boolean): Promise<boolean> {
+  const key = await deriveKey(pass, S.vault!.salt, S.vault!.iter);
+  if (!(await useKey(key))) return false;
+  if (remember) await idb("readwrite", s => s.put(key, "key")).catch(() => {});
+  return true;
+}
+/** "Gerät abmelden": forget key, token and local data on this device. */
+export async function signOut() {
+  await idb("readwrite", s => s.delete("key")).catch(() => {});
+  ["fk2_data", "fk2_sha", "fk2_dirty", "fk2_last", "fk2_collapsed", "fk_data"].forEach(LS.del);
+  location.reload();
+}
+
+/* ---------- triggers: debounce on edit, tab visible, every 3 min, back online ---------- */
+document.addEventListener("visibilitychange", () => { if (S.token) scheduleSync(document.hidden ? 0 : 200); });
+addEventListener("online", () => S.token && scheduleSync(200));
+setInterval(() => { if (S.token && !document.hidden) sync(); }, 3 * 60_000);

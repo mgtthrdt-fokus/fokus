@@ -1,0 +1,25 @@
+{
+  "name": "fokus",
+  "version": "2.0.0-m1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "vault": "node tools/make-vault.ts",
+    "migrate": "node tools/migrate.ts"
+  },
+  "dependencies": {
+    "fractional-indexing": "4.0.0",
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "2.10.6",
+    "@types/node": "24.19.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

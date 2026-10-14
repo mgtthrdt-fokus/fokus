@@ -1,11 +1,12 @@
-// Service Worker — cache-first mit Hintergrund-Aktualisierung.
-// CacheStorage gilt für die ganze Origin mgtthrdt.github.io (Satzbuch, W&B, Checklisten) —
-// daher nur EIGENE Caches (Präfix "fokus-") anfassen. GitHub-API-Aufrufe gehen nie über den Cache.
+// Service worker: cache-first with background refresh (v1 pattern).
+// CacheStorage is shared by the whole origin mgtthrdt.github.io (Satzbuch, W&B, Checklisten),
+// so only touch caches with the "fokus-" prefix. GitHub API calls never go through the cache.
 const PREFIX = "fokus-";
-const CACHE = PREFIX + "v1.0.0";
+const CACHE = PREFIX + (new URL(location.href).searchParams.get("v") || "dev");
 const SCOPE = new URL(self.registration.scope);
 const DOC = new URL("index.html", SCOPE).href;
 const ASSETS = ["index.html", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"].map(u => new URL(u, SCOPE).href);
+
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
@@ -19,7 +20,7 @@ self.addEventListener("fetch", e => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== SCOPE.origin || !url.pathname.startsWith(SCOPE.pathname)) return;
-  if (url.pathname === SCOPE.pathname + "version.json") return;
+  if (url.pathname.endsWith("/version.json")) return;   // always fresh; vault.json is cached so a remembered key works offline
   const isDoc = url.pathname === SCOPE.pathname || url.pathname === SCOPE.pathname + "index.html";
   const key = isDoc ? DOC : url.origin + url.pathname;
   e.respondWith(caches.open(CACHE).then(async c => {
@@ -28,7 +29,7 @@ self.addEventListener("fetch", e => {
       if (res && res.ok && res.type === "basic" && !res.redirected) c.put(key, res.clone()).catch(() => {});
       return res;
     });
-    if (hit) { try { e.waitUntil(net.catch(() => {})); } catch (_) { net.catch(() => {}); } return hit; }
+    if (hit) { e.waitUntil(net.catch(() => {})); return hit; }
     return net;
   }));
 });
