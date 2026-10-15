@@ -45,7 +45,7 @@ export function TodayView({ t }: { t: Tree }) {
 }
 
 /* ---------- Tagesplan: time blocking (Newport) on 15-minute rows ---------- */
-const DAY_START = 7, DAY_END = 19, ROW = 15, ROW_PX = 14;
+const DAY_START = 6, DAY_END = 20, ROW = 15, ROW_PX = 14;
 const minOf = (plan: string) => +plan.slice(11, 13) * 60 + +plan.slice(14, 16);
 const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 const lenOf = (n: FNode) => Math.max(ROW, Math.round((Number(n.est) || 0.5) * 60 / ROW) * ROW);   // no estimate: 30 min

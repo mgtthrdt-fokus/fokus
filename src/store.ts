@@ -105,7 +105,13 @@ const replace = (id: string, f: (n: FNode) => FNode) => commit(S.file.nodes.map(
 
 export const update = (id: string, patch: Partial<FNode>) => replace(id, n => ({ ...n, ...patch }));
 
-const childType: Record<NodeType, NodeType> = { area: "project", project: "task", package: "task", task: "task", note: "note", meeting: "task", system: "task" };
+export const childType: Record<NodeType, NodeType> = { area: "project", project: "task", package: "task", task: "task", note: "note", meeting: "task", system: "task" };
+
+/** New last child of `parent` (null = top level: a Bereich), opened if it was collapsed. */
+export function addChild(parent: string | null): string {
+  if (parent && S.collapsed.has(parent)) setUi({ toggle: parent });
+  return add(parent, tree.kids(parent).at(-1)?.id ?? null, { type: parent ? childType[tree.byId.get(parent)!.type] : "area" });
+}
 
 /** New node directly after `after` (or first child of `parent` when after is null). */
 export function add(parent: string | null, after: string | null, p: Partial<FNode> = {}): string {

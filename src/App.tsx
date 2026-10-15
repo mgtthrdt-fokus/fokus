@@ -1,8 +1,8 @@
 import { useEffect, useState } from "preact/hooks";
-import { S, exportText, importText, loadVault, setUi, signOut, sync, undo, unlock, useStore } from "./store.ts";
+import { S, addChild, exportText, importText, loadVault, setUi, signOut, sync, undo, unlock, useStore } from "./store.ts";
 import { TimerBar } from "./Timer.tsx";
 import { toast } from "./views.tsx";
-import { FocusList, Outline, RowMenu, Title, go, href, nav, parseHash, type Route, type View } from "./Outline.tsx";
+import { FocusList, NEW_NAME, Outline, RowMenu, Title, focusTitle, go, href, nav, openMenu, parseHash, type Route, type View } from "./Outline.tsx";
 import { metaLine } from "./fmt.ts";
 import { INBOX, today } from "./model.ts";
 import { Inspector } from "./Inspector.tsx";
@@ -149,20 +149,27 @@ function Help({ close }: { close: () => void }) {
 }
 
 function Sidebar({ t, active }: { t: Tree; active: string | null }) {
-  const line = (id: string, title: string, lvl: number) => {
+  // ＋ opens the parent in the outline with a new, focused row: type the name, Enter
+  const create = (parent: string | null) => { nav({ id: parent, v: "outline", f: false }); focusTitle(addChild(parent), 0); };
+  const line = (id: string, title: string, lvl: number, plus = false) => {
     const r = t.rollup(id);
-    return <a key={id} class="sitem" style={{ "--lvl": lvl } as any} aria-current={active === id ? "true" : undefined} href={href({ ...parseHash(), id, v: parseHash().v === "today" || parseHash().v === "review" ? "outline" : parseHash().v })}>
-      <span class="st">{title || "Ohne Titel"}</span>
-      <span class="sn mono">{r.overdue ? <span class="od">⚠{r.overdue} </span> : null}{r.open || ""}</span>
-    </a>;
+    return <div key={id} class="sline" style={{ "--lvl": lvl } as any}>
+      <a class="sitem" aria-current={active === id ? "true" : undefined} href={href({ ...parseHash(), id, v: parseHash().v === "today" || parseHash().v === "review" ? "outline" : parseHash().v })}>
+        <span class="st">{title || "Ohne Titel"}</span>
+        <span class="sn mono">{r.overdue ? <span class="od">⚠{r.overdue} </span> : null}{r.open || ""}</span>
+      </a>
+      {plus && <button class="sbtn" title={NEW_NAME.project + " in " + title} aria-label={NEW_NAME.project + " in " + title} onClick={() => create(id)}>＋</button>}
+      {id !== INBOX && <button class="sbtn" aria-label={"Aktionen für " + title} onClick={e => { const b = e.currentTarget.getBoundingClientRect(); openMenu(id, b.left, b.bottom); }}>⋯</button>}
+    </div>;
   };
   return <aside class="sidebar" aria-label="Bereiche und Projekte">
     <p class="label">Fokus</p>
     {line(INBOX, "Eingang", 0)}
     {t.kids(null).filter(n => n.id !== INBOX && !n.archived).map(a => <>
-      {line(a.id, a.title, 0)}
+      {line(a.id, a.title, 0, a.type === "area")}
       {t.kids(a.id).filter(p => (p.type === "project" || p.type === "area") && !p.archived).map(p => line(p.id, p.title, 1))}
     </>)}
+    <button class="add" onClick={() => create(null)}><span aria-hidden="true">＋</span> Bereich</button>
   </aside>;
 }
 

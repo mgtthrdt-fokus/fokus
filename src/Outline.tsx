@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { ComponentChildren, JSX } from "preact";
 import { INBOX, STATUSES, addDays, isActionable, isOpen, today, type FNode, type NodeType, type Status } from "./model.ts";
-import { S, add, getTree, indent, moveBy, moveRel, outdent, remove, setStatus, setUi, toggleDone, update } from "./store.ts";
+import { S, add, addChild, childType, getTree, indent, moveBy, moveRel, outdent, remove, setStatus, setUi, toggleDone, update } from "./store.ts";
 import type { Tree } from "./tree.ts";
 import { fmtDue, hours, isOverdue, overdueDays } from "./fmt.ts";
 import { byRank } from "./rank.ts";
@@ -28,7 +28,9 @@ export const go = (id: string | null) => { const r = parseHash(); nav({ id, v: r
 /* ---------- focus handoff across re-renders ---------- */
 let pending: { id: string; caret: number | "end" } | null = null;
 let editingId: string | null = null;   // row with the caret; stays visible past the depth limit
-const focusTitle = (id: string, caret: number | "end" = "end") => { pending = { id, caret }; };
+export const focusTitle = (id: string, caret: number | "end" = "end") => { pending = { id, caret }; };
+/** What "＋" creates under a node, in words. */
+export const NEW_NAME: Record<string, string> = { area: "Neuer Bereich", project: "Neues Projekt", package: "Neues Arbeitspaket", task: "Neue Aufgabe", note: "Neue Notiz", meeting: "Neues Meeting" };
 function caretOffset(el: HTMLElement): number {
   const s = getSelection(); if (!s || !s.rangeCount) return el.textContent!.length;
   const r = s.getRangeAt(0).cloneRange(); r.selectNodeContents(el); r.setEnd(s.getRangeAt(0).endContainer, s.getRangeAt(0).endOffset);
@@ -96,7 +98,14 @@ export function Title({ n, root, tag = "span", class: cls = "title", flat = fals
   const Tag = tag as any;
   return <Tag ref={ref} class={cls} data-title={n.id} contentEditable={n.id === INBOX ? false : "plaintext-only"} spellcheck={false}
     role="textbox" aria-label="Titel" onInput={onInput} onKeyDown={onKey}
-    onFocus={() => { editingId = n.id; if (S.sel && S.sel !== n.id) setUi({ sel: n.id }); }} onBlur={() => { if (editingId === n.id) editingId = null; }} />;
+    onFocus={() => { editingId = n.id; if (S.sel && S.sel !== n.id) setUi({ sel: n.id }); }}
+    onBlur={() => {
+      if (editingId === n.id) editingId = null;
+      // a fresh outline row left empty is clutter, not data: drop it (never rows with children or older ones)
+      const x = getTree().byId.get(n.id);
+      if (!flat && x && n.id !== root && n.id !== INBOX && !x.title.trim() && !getTree().kids(n.id).length && Date.now() - Date.parse(x.created) < 10 * 60_000)
+        setTimeout(() => { const y = getTree().byId.get(n.id); if (y && !y.title.trim() && document.activeElement?.getAttribute("data-title") !== n.id) remove(n.id); }, 0);
+    }} />;
 }
 
 /* ---------- row menu (right-click / long-press on bullet / Ctrl+/) ---------- */
@@ -133,6 +142,7 @@ export function RowMenu() {
       onKeyDown={e => { if (e.key === "Escape") close(); }}>
       <button role="menuitem" onClick={act(() => go(n.id))}>Hineinzoomen</button>
       <button role="menuitem" onClick={act(() => setUi({ sel: n.id }))}>Details</button>
+      {n.type !== "task" && <button role="menuitem" onClick={act(() => focusTitle(addChild(n.id), 0))}>＋ {NEW_NAME[childType[n.type]]} darin</button>}
       {isActionable(n) && isOpen(n) && <button role="menuitem" onClick={act(() => startTimer(n.id))}>▶ Fokus-Timer 25 min</button>}
       {n.obsidian && <a role="menuitem" class="mi" href={n.obsidian} onClick={close}>◈ In Obsidian öffnen</a>}
       {n.id !== INBOX && <>
@@ -190,12 +200,17 @@ function Bullet({ n, more }: { n: FNode; more: boolean }) {
   const down = (e: PointerEvent) => {
     long.current = false;
     if (e.pointerType !== "mouse") timer.current = window.setTimeout(() => { long.current = true; navigator.vibrate?.(10); openMenu(n.id, e.clientX, e.clientY); }, 450);
+    // Chrome never drags a <button>; so the row becomes draggable while the bullet is held (text editing stays normal)
+    else if (n.id !== INBOX) {
+      const li = (e.currentTarget as HTMLElement).closest("li"); if (!li) return;
+      li.draggable = true;
+      addEventListener("pointerup", () => { li.draggable = false; }, { once: true });
+    }
   };
   const up = () => clearTimeout(timer.current);
   // the bullet is also the drag handle (desktop); titles stay selectable text
   return <button class="bullet" data-t={n.type} data-more={more || undefined} aria-label={`In „${n.title || "Ohne Titel"}“ hineinzoomen`}
-    style={n.color ? { "--pc": n.color } as any : undefined} draggable={n.id !== INBOX}
-    onDragStart={e => { e.dataTransfer!.setData("text/plain", n.id); e.dataTransfer!.effectAllowed = "move"; }}
+    style={n.color ? { "--pc": n.color } as any : undefined}
     onPointerDown={down} onPointerUp={up} onPointerLeave={up} onPointerCancel={up}
     onClick={() => { if (!long.current) go(n.id); }}><i class="b" /></button>;
 }
@@ -220,7 +235,8 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
   const [drop, setDrop] = useState<{ id: string; where: "before" | "after" | "inside" } | null>(null);
   const rows = visible(t, root, S.depth);
   const last = t.kids(root).at(-1);
-  const addEnd = () => { const id = add(root, last?.id ?? null); focusTitle(id, 0); };
+  const addEnd = () => focusTitle(addChild(root), 0);
+  const newName = NEW_NAME[root ? childType[t.byId.get(root)?.type ?? "task"] : "area"];
   return <>
     <ul class="tree" role="tree" aria-label="Gliederung">
       {rows.map(({ n, lvl, kids, open }) => {
@@ -231,6 +247,8 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
         return <li key={n.id} class="row" role="treeitem" aria-level={lvl} aria-expanded={kids ? open : undefined}
           data-t={n.type} data-lvl={lvl - 1} data-done={n.status === "done" || undefined} data-arch={n.archived || undefined} data-prop={n.proposed || undefined}
           data-drop={drop?.id === n.id ? drop.where : undefined}
+          onDragStart={e => { if (!e.currentTarget.draggable) return; e.dataTransfer!.setData("text/plain", n.id); e.dataTransfer!.effectAllowed = "move"; }}
+          onDragEnd={e => { e.currentTarget.draggable = false; setDrop(null); }}
           style={{ "--lvl": lvl - 1, "--guide": lvl > 1 ? "block" : "none" } as any}
           onDragOver={e => {
             e.preventDefault();
@@ -261,8 +279,8 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
         </li>;
       })}
     </ul>
-    {!rows.length && <p class="empty">Leer. Mit <span class="mono">Enter</span> im Titel oder unten den ersten Eintrag anlegen.</p>}
-    <button class="add" onClick={addEnd}><span aria-hidden="true">＋</span> Neu</button>
+    {!rows.length && <p class="empty">Noch leer. Unten auf „＋ {newName}“ klicken oder <span class="mono">N</span> drücken.</p>}
+    <button class="add" onClick={addEnd}><span aria-hidden="true">＋</span> {newName}</button>
   </>;
 }
 
@@ -281,9 +299,9 @@ export function Card({ n, t, path = true, extra, drag, root = null }: { n: FNode
     onContextMenu={e => { e.preventDefault(); openMenu(n.id, e.clientX, e.clientY); }}>
     <span class="check"><button role="checkbox" aria-checked={n.status === "done"} aria-label="Erledigt" onClick={() => toggleDone(n.id)}>
       {n.status === "done" && <Tick />}</button></span>
-    <span class="body">
+    <span class="body" onClick={e => { if (!(e.target as HTMLElement).closest("a, button, input")) setUi({ sel: n.id }); }}>
       {path && <span class="path">{t.path(n.parent).slice(t.path(root).length).map(p => p.title).join(" › ") || "\u00a0"}</span>}
-      <Title n={n} root={null} flat />
+      <span class="title">{n.title || "Ohne Titel"}</span>
       <Chips n={n} t={t} showRollup={false} />
     </span>
     {extra && <span class="extra">{extra}</span>}
