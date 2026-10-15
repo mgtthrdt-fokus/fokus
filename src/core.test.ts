@@ -140,7 +140,10 @@ describe("vault", () => {
     expect(v.salt).not.toBe("V3J3jEIljVJHFQzbOp7PGQ==");
     expect(await openVault(v, await deriveKey("korrekt pferd batterie heftklammer", v.salt))).toBe("github_pat_test");
     await expect(openVault(v, await deriveKey("falsch", v.salt))).rejects.toThrow();
-  }, 20_000);
+    // copied from a password manager with a trailing line break: same key
+    expect(await openVault(v, await deriveKey("korrekt pferd batterie heftklammer\r\n", v.salt))).toBe("github_pat_test");
+    expect((await makeVault("t", "p", v.dataSalt)).dataSalt).toBe(v.dataSalt);   // token renewal keeps the data key
+  }, 30_000);
 });
 
 import { parseDate, parseQuick } from "./parse.ts";

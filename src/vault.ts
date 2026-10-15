@@ -9,7 +9,7 @@ export const b64 = (u: Uint8Array) => { let s = ""; for (const x of u) s += Stri
 export const unb64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
 export async function deriveKey(pass: string, salt: string, iter = ITER, extractable = false): Promise<CryptoKey> {
-  const base = await crypto.subtle.importKey("raw", enc.encode(pass.normalize("NFC")), "PBKDF2", false, ["deriveKey"]);
+  const base = await crypto.subtle.importKey("raw", enc.encode(pass.normalize("NFC").trim()), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey({ name: "PBKDF2", salt: unb64(salt), iterations: iter, hash: "SHA-256" },
     base, { name: "AES-GCM", length: 256 }, extractable, ["encrypt", "decrypt"]);
 }
