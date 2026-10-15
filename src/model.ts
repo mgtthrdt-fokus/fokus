@@ -20,6 +20,9 @@ export interface FNode {
   done?: string | null;
   focus?: string | null;
   when?: string;
+  repeat?: Repeat;        // on done, a copy with the next due date is created
+  plan?: string;          // time block "YYYY-MM-DDTHH:MM" (Tagesplan); length = est or 30 min
+  obsidian?: string;      // obsidian://open?vault=…&file=… (only that scheme is accepted)
   resume?: string;
   short?: string;
   color?: string;
@@ -40,6 +43,8 @@ export interface FNode {
 export interface FileV2 { schema: 2; nodes: FNode[]; deleted: Record<string, string> }
 
 export const INBOX = "sys_inbox";
+export type Repeat = "daily" | "weekdays" | "weekly" | "monthly" | "yearly";
+export const REPEATS: Repeat[] = ["daily", "weekdays", "weekly", "monthly", "yearly"];
 export const STATUSES: Status[] = ["inbox", "now", "next", "later", "waiting", "done"];
 
 export const now = () => new Date().toISOString();

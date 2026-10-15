@@ -116,7 +116,7 @@ h1.root:empty::before { content: "Ohne Titel"; color: var(--text-3); }
 .focuslist .path { flex-basis: 100%; font: 11px/16px var(--mono); color: var(--text-3); margin-bottom: 4px; }
 
 /* ---------- menus & sheets ---------- */
-.menu { position: fixed; z-index: 20; min-width: 200px; max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r1); padding: 6px; box-shadow: 0 8px 30px rgb(0 0 0 / .25); }
+.menu { position: fixed; z-index: 20; min-width: 200px; max-height: calc(100vh - 16px); overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r1); padding: 6px; box-shadow: 0 8px 30px rgb(0 0 0 / .25); }
 .menu .h { font: 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); padding: 8px 10px 4px; }
 .menu button { display: flex; width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; gap: 8px; min-height: 36px; align-items: center; }
 .menu button:hover, .menu button:focus-visible { background: var(--surface-2); }
@@ -236,3 +236,55 @@ main:has(.board) { max-width: none; }
 .crumbs { flex: 1 1 180px; }
 .seg button { white-space: nowrap; }
 @media (max-width: 699px) { .crumbs { flex-basis: 100%; } .banner p { margin: 0; } }
+
+/* ---------- row actions (⋯): visible on hover/focus with a mouse, always on touch ---------- */
+.rowmore { flex: none; align-self: flex-start; height: var(--row); opacity: 0; font-size: 18px; letter-spacing: 1px; }
+.row:hover .rowmore, .row:focus-within .rowmore, .rowmore:focus-visible { opacity: 1; }
+@media (pointer: coarse) { .rowmore { opacity: .7; } }
+.menu a.mi { display: flex; padding: 8px 10px; border-radius: 6px; min-height: 36px; align-items: center; color: inherit; text-decoration: none; }
+.menu a.mi:hover { background: var(--surface-2); }
+.chips a.obs { color: var(--accent); text-decoration: none; }
+
+/* ---------- drag & drop in the outline: a line (before/after) or a frame (inside), not colour alone ---------- */
+.bullet[draggable="true"] { cursor: grab; }
+.row[data-drop="before"] { box-shadow: inset 0 3px 0 var(--accent); }
+.row[data-drop="after"] { box-shadow: inset 0 -3px 0 var(--accent); }
+.row[data-drop="inside"] { outline: 2px dashed var(--accent); outline-offset: -2px; }
+
+/* ---------- focus timer ---------- */
+.timer { position: fixed; z-index: 8; left: 50%; transform: translateX(-50%); bottom: calc(16px + var(--sab)); width: min(560px, calc(100% - 32px));
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; border-radius: var(--r2);
+  background: var(--surface); border: 1px solid var(--line); box-shadow: 0 8px 30px rgb(0 0 0 / .25); }
+.timer .big { font-size: 22px; min-width: 64px; }
+.timer .tt { flex: 1 1 140px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timer[data-kind="break"] .tt::before { content: "☕ "; }
+.timer .tbar { flex-basis: 100%; height: 3px; background: var(--surface-2); border-radius: 2px; overflow: hidden; order: 9; }
+.timer .tbar > i { display: block; height: 100%; background: var(--accent); }
+@media (max-width: 699px) { .timer { bottom: calc(68px + var(--sab)); } .fab { bottom: calc(150px + var(--sab)); } }
+
+/* ---------- Tagesplan ---------- */
+.dayplan { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 16px; align-items: start; }
+@media (max-width: 760px) { .dayplan { grid-template-columns: 1fr; } }
+.dayplan .grid { position: relative; display: grid; grid-template-columns: 46px minmax(0, 1fr); grid-template-rows: repeat(var(--rows), var(--rowpx));
+  background: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px calc(var(--rowpx) * 4)); border-radius: var(--r1); }
+.dayplan .hr { grid-column: 1; font-size: 11px; color: var(--text-3); padding-top: 2px; }
+.dayplan .now { position: absolute; left: 40px; right: 0; height: 0; border-top: 2px solid var(--danger); }
+.dayplan .now::before { content: ""; position: absolute; left: -5px; top: -6px; border: 5px solid transparent; border-left-color: var(--danger); }
+.dayplan .block { grid-column: 2; margin: 1px 2px; padding: 3px 8px; border-radius: 8px; overflow: hidden; display: flex; gap: 2px 8px; flex-wrap: wrap; align-content: flex-start;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface)); border-left: 4px solid var(--accent); font-size: 13px; cursor: grab; }
+.dayplan .block[data-t="meeting"] { border-left-style: double; border-left-width: 6px; }
+.dayplan .block.clash { margin-left: 34%; border: 1px dashed var(--warn); border-left: 4px solid var(--warn); }
+.dayplan .block .mono { font-size: 11px; color: var(--text-2); }
+.dayplan .block .bt { flex: 1 1 120px; }
+.dayplan .bacts { display: inline-flex; gap: 2px; margin-left: auto; }
+.dayplan .bacts button { padding: 0 5px; color: var(--text-2); }
+.dayplan .cands input[type="time"] { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; font-size: 14px; }
+
+/* ---------- inspector extras, help ---------- */
+.row2 { display: flex; gap: 6px; align-items: center; }
+.row2 input { flex: 1; }
+.quick .grp { margin: 0; gap: 4px; }
+.btn[aria-pressed="true"] { outline: 2px solid var(--accent); }
+.keys { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 16px; }
+.keys dt { font-size: 13px; color: var(--text); }
+.keys dd { margin: 0; color: var(--text-2); }

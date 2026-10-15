@@ -247,3 +247,31 @@ describe("normalize at the trust boundary", () => {
     expect(y.touched).toBeUndefined();
   });
 });
+
+import { nextDate } from "./parse.ts";
+
+describe("recurring tasks", () => {
+  it("next dates: weekdays skip the weekend, months clamp to their last day", () => {
+    expect(nextDate("2026-10-14", "daily")).toBe("2026-10-15");
+    expect(nextDate("2026-10-16", "weekdays")).toBe("2026-10-19");   // Fri → Mon
+    expect(nextDate("2026-10-14", "weekly")).toBe("2026-10-21");
+    expect(nextDate("2026-01-31", "monthly")).toBe("2026-02-28");
+    expect(nextDate("2028-02-29", "yearly")).toBe("2029-02-28");
+  });
+  it("quick-add understands German repeat words", () => {
+    const T = "2026-10-14";
+    expect(parseQuick("Bericht jeden mo", T)).toMatchObject({ title: "Bericht", repeat: "weekly", due: "2026-10-19" });
+    expect(parseQuick("Mails werktags", T)).toMatchObject({ title: "Mails", repeat: "weekdays" });
+    expect(parseQuick("Miete jeden monat", T)).toMatchObject({ title: "Miete", repeat: "monthly" });
+    expect(parseQuick("Jeden zweiten Tag gießen", T).repeat).toBeUndefined();   // not a repeat phrase → stays text
+  });
+  it("normalize keeps only safe obsidian links, valid repeats and time blocks", () => {
+    const f = normalize({ schema: 2, deleted: {}, nodes: [
+      { id: "a", type: "task", title: "a", obsidian: "obsidian://open?vault=V&file=Meetings%2FX", repeat: "weekly", plan: "2026-10-15T09:30" },
+      { id: "b", type: "task", title: "b", obsidian: "javascript:alert(1)", repeat: "hourly", plan: "9:30" },
+      { id: "c", type: "task", title: "c", obsidian: "https://evil.example" },
+    ] });
+    expect(get(f, "a")).toMatchObject({ obsidian: "obsidian://open?vault=V&file=Meetings%2FX", repeat: "weekly", plan: "2026-10-15T09:30" });
+    expect([get(f, "b").obsidian, get(f, "b").repeat, get(f, "b").plan, get(f, "c").obsidian]).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});

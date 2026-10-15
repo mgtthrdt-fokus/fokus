@@ -1,11 +1,14 @@
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { ComponentChildren, JSX } from "preact";
-import { INBOX, STATUSES, isActionable, isOpen, today, type FNode, type NodeType, type Status } from "./model.ts";
-import { S, add, getTree, indent, moveBy, outdent, remove, setStatus, setUi, toggleDone, update } from "./store.ts";
+import { INBOX, STATUSES, addDays, isActionable, isOpen, today, type FNode, type NodeType, type Status } from "./model.ts";
+import { S, add, getTree, indent, moveBy, moveRel, outdent, remove, setStatus, setUi, toggleDone, update } from "./store.ts";
 import type { Tree } from "./tree.ts";
 import { fmtDue, hours, isOverdue, overdueDays } from "./fmt.ts";
 import { byRank } from "./rank.ts";
 import { liveTasks } from "./today.ts";
+import { startTimer } from "./Timer.tsx";
+import { toast } from "./views.tsx";
+export const REPEAT_NAME: Record<string, string> = { daily: "täglich", weekdays: "werktags", weekly: "wöchentlich", monthly: "monatlich", yearly: "jährlich" };
 
 export type View = "outline" | "today" | "board" | "meetings" | "review";
 export interface Route { id: string | null; v: View; f: boolean }
@@ -102,24 +105,39 @@ export const openMenu = (id: string, x: number, y: number) => setMenuState({ id,
 const TYPES: [NodeType, string][] = [["area", "Bereich"], ["project", "Projekt"], ["package", "Arbeitspaket"], ["task", "Aufgabe"], ["note", "Notiz"], ["meeting", "Meeting"]];
 export const STATUS_NAME: Record<Status, string> = { inbox: "Eingang", now: "Fokus heute", next: "Diese Woche", later: "Später", waiting: "Wartet auf", done: "Erledigt" };
 
+// Things-style "When": the four dates people actually pick
+const nextMonday = () => { const t = today(), d = new Date(t + "T12:00:00").getDay(); return addDays(t, ((8 - d) % 7) || 7); };
+export const QUICK: [string, () => string | null][] = [["Heute", today], ["Morgen", () => addDays(today(), 1)], ["Nächste Woche (Mo)", nextMonday], ["Kein Datum", () => null]];
+
 export function RowMenu() {
   const [m, set] = useState<{ id: string; x: number; y: number } | null>(null);
   setMenuState = set;
   const box = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => { box.current?.querySelector("button")?.focus(); }, [m]);
+  useLayoutEffect(() => {
+    const el = box.current; if (!el) return;
+    // clamp with the real size: the menu is taller for tasks than for projects
+    const r = el.getBoundingClientRect();
+    el.style.top = Math.max(8, Math.min(r.top, innerHeight - r.height - 8)) + "px";
+    el.style.left = Math.max(8, Math.min(r.left, innerWidth - r.width - 8)) + "px";
+    el.querySelector<HTMLElement>("button, a")?.focus();
+  }, [m]);
   if (!m) return null;
   const n = getTree().byId.get(m.id); if (!n) return null;
   const close = () => set(null);
   const act = (f: () => void) => () => { f(); close(); };
   const setType = (t: NodeType) => update(n.id, t === "task" ? { type: t, status: n.status ?? "next" } : { type: t });
-  const x = Math.min(m.x, innerWidth - 220), y = Math.min(m.y, innerHeight - 380);
+  const x = m.x, y = m.y;
   return <>
     <div class="scrim" style={{ background: "transparent" }} onClick={close} onContextMenu={e => { e.preventDefault(); close(); }} />
     <div class="menu" role="menu" ref={box} style={{ left: Math.max(8, x) + "px", top: Math.max(8, y) + "px" }}
       onKeyDown={e => { if (e.key === "Escape") close(); }}>
       <button role="menuitem" onClick={act(() => go(n.id))}>Hineinzoomen</button>
       <button role="menuitem" onClick={act(() => setUi({ sel: n.id }))}>Details</button>
+      {isActionable(n) && isOpen(n) && <button role="menuitem" onClick={act(() => startTimer(n.id))}>▶ Fokus-Timer 25 min</button>}
+      {n.obsidian && <a role="menuitem" class="mi" href={n.obsidian} onClick={close}>◈ In Obsidian öffnen</a>}
       {n.id !== INBOX && <>
+        {isActionable(n) && <><div class="h">Fällig</div>
+          {QUICK.map(([l, f]) => <button role="menuitemradio" aria-checked={(n.due ?? null) === f()} onClick={act(() => update(n.id, { due: f() }))}>{l}</button>)}</>}
         <div class="h">Typ</div>
         {TYPES.map(([t, name]) => <button role="menuitemradio" aria-checked={n.type === t} onClick={act(() => setType(t))}>{name}</button>)}
         {isActionable(n) && <><div class="h">Status</div>
@@ -128,10 +146,7 @@ export function RowMenu() {
           <button role="menuitem" onClick={act(() => update(n.id, { state: n.state === "holding" ? "active" : "holding" }))}>{n.state === "holding" ? "Wieder aktiv" : "Pausieren"}</button>
           <button role="menuitem" onClick={act(() => update(n.id, { archived: !n.archived }))}>{n.archived ? "Aus Archiv holen" : "Archivieren"}</button></>}
         <div class="h" />
-        <button role="menuitem" class="danger" onClick={act(() => {
-          const k = getTree().rollup(n.id).total + getTree().kids(n.id).length;
-          if (!k || confirm(`„${n.title || "Ohne Titel"}“ mit allen Unterpunkten löschen?`)) remove(n.id);
-        })}>Löschen…</button>
+        <button role="menuitem" class="danger" onClick={act(() => { const k = getTree().kids(n.id).length; remove(n.id); toast(`„${n.title || "Ohne Titel"}“${k ? " mit Unterpunkten" : ""} gelöscht.`, true); })}>Löschen</button>
       </>}
     </div>
   </>;
@@ -144,8 +159,11 @@ export function Chips({ n, t, showRollup }: { n: FNode; t: Tree; showRollup: boo
     if (n.status === "waiting") c.push(<span class="wt">⏳ {n.waitingOn || "wartet"}</span>);
     if (n.status === "now") c.push(<span>◎ heute</span>);
     if (n.due) c.push(isOverdue(n.due) && n.status !== "waiting" ? <span class="od">⚠ {overdueDays(n.due)} T überfällig</span> : <span>→ {fmtDue(n.due)}</span>);
-    if (n.est) c.push(<span>{hours(Number(n.est))}</span>);
+    if (n.est || n.act) c.push(<span title="Ist / geschätzt">{n.act ? `⏱ ${hours(Number(n.act))}${n.est ? " / " + hours(Number(n.est)) : ""}` : hours(Number(n.est))}</span>);
+    if (n.plan) c.push(<span title="Zeitblock">▦ {n.plan.slice(8, 10)}.{n.plan.slice(5, 7)}. {n.plan.slice(11)}</span>);
   }
+  if (n.repeat) c.push(<span title="Wiederholt sich">↻ {REPEAT_NAME[n.repeat]}</span>);
+  if (n.obsidian) c.push(<a class="obs" href={n.obsidian} title="Notiz in Obsidian öffnen">◈ Notiz</a>);
   if (n.proposed) c.push(<span class="prop">Vorschlag von Claude
     <button onClick={() => update(n.id, { proposed: undefined })} aria-label="Vorschlag annehmen">✓ annehmen</button>
     <button onClick={() => remove(n.id)} aria-label="Vorschlag verwerfen">✕</button></span>);
@@ -174,8 +192,10 @@ function Bullet({ n, more }: { n: FNode; more: boolean }) {
     if (e.pointerType !== "mouse") timer.current = window.setTimeout(() => { long.current = true; navigator.vibrate?.(10); openMenu(n.id, e.clientX, e.clientY); }, 450);
   };
   const up = () => clearTimeout(timer.current);
+  // the bullet is also the drag handle (desktop); titles stay selectable text
   return <button class="bullet" data-t={n.type} data-more={more || undefined} aria-label={`In „${n.title || "Ohne Titel"}“ hineinzoomen`}
-    style={n.color ? { "--pc": n.color } as any : undefined}
+    style={n.color ? { "--pc": n.color } as any : undefined} draggable={n.id !== INBOX}
+    onDragStart={e => { e.dataTransfer!.setData("text/plain", n.id); e.dataTransfer!.effectAllowed = "move"; }}
     onPointerDown={down} onPointerUp={up} onPointerLeave={up} onPointerCancel={up}
     onClick={() => { if (!long.current) go(n.id); }}><i class="b" /></button>;
 }
@@ -197,6 +217,7 @@ function visible(t: Tree, root: string | null, depth: number): Vis[] {
 }
 
 export function Outline({ t, root }: { t: Tree; root: string | null }) {
+  const [drop, setDrop] = useState<{ id: string; where: "before" | "after" | "inside" } | null>(null);
   const rows = visible(t, root, S.depth);
   const last = t.kids(root).at(-1);
   const addEnd = () => { const id = add(root, last?.id ?? null); focusTitle(id, 0); };
@@ -209,7 +230,20 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
         const r = kids > 0 ? t.rollup(n.id) : null;
         return <li key={n.id} class="row" role="treeitem" aria-level={lvl} aria-expanded={kids ? open : undefined}
           data-t={n.type} data-lvl={lvl - 1} data-done={n.status === "done" || undefined} data-arch={n.archived || undefined} data-prop={n.proposed || undefined}
+          data-drop={drop?.id === n.id ? drop.where : undefined}
           style={{ "--lvl": lvl - 1, "--guide": lvl > 1 ? "block" : "none" } as any}
+          onDragOver={e => {
+            e.preventDefault();
+            const r = e.currentTarget.getBoundingClientRect(), y = (e.clientY - r.top) / r.height;
+            const where = y < 0.3 ? "before" : y > 0.7 ? "after" : "inside";
+            if (drop?.id !== n.id || drop.where !== where) setDrop({ id: n.id, where });
+          }}
+          onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDrop(null); }}
+          onDrop={e => {
+            e.preventDefault(); setDrop(null);
+            const id = e.dataTransfer?.getData("text/plain");
+            if (id && drop && t.byId.has(id)) { moveRel(id, n.id, drop.where); if (drop.where === "inside" && S.collapsed.has(n.id)) setUi({ toggle: n.id }); }
+          }}
           onContextMenu={e => { e.preventDefault(); openMenu(n.id, e.clientX, e.clientY); }}>
           <button class="caret" tabIndex={-1} aria-expanded={kids ? open : undefined} aria-label={kids ? (open ? "Zuklappen" : "Aufklappen") : undefined}
             onClick={() => kids && (lvl >= S.depth && !open ? go(n.id) : setUi({ toggle: n.id }))}>{kids ? <Caret /> : null}</button>
@@ -222,6 +256,8 @@ export function Outline({ t, root }: { t: Tree; root: string | null }) {
             <Chips n={n} t={t} showRollup={showRollup} />
             {r && r.total > 0 && container && <span class="mini" aria-hidden="true"><i style={{ width: r.pct + "%" }} /></span>}
           </span>
+          <button class="iconbtn rowmore" aria-label={`Aktionen für „${n.title || "Ohne Titel"}“`} title="Aktionen (Strg+/)"
+            onClick={e => { const b = e.currentTarget.getBoundingClientRect(); openMenu(n.id, b.right - 220, b.bottom); }}>⋯</button>
         </li>;
       })}
     </ul>

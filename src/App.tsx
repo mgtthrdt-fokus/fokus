@@ -1,5 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
-import { S, exportText, importText, loadVault, setUi, signOut, sync, unlock, useStore } from "./store.ts";
+import { S, exportText, importText, loadVault, setUi, signOut, sync, undo, unlock, useStore } from "./store.ts";
+import { TimerBar } from "./Timer.tsx";
+import { toast } from "./views.tsx";
 import { FocusList, Outline, RowMenu, Title, go, href, nav, parseHash, type Route, type View } from "./Outline.tsx";
 import { metaLine } from "./fmt.ts";
 import { INBOX, today } from "./model.ts";
@@ -23,7 +25,7 @@ const Icon = ({ d }: { d: string }) => <svg width="20" height="20" viewBox="0 0 
 export function App() {
   const t = useStore();
   const [route, setRoute] = useState<Route>(parseHash);
-  const [sheet, setSheet] = useState(false);
+  const [sheet, setSheet] = useState(false), [help, setHelp] = useState(false);
   useEffect(() => { const f = () => setRoute(parseHash()); addEventListener("hashchange", f); return () => removeEventListener("hashchange", f); }, []);
   useEffect(() => { loadVault(); }, []);
 
@@ -37,11 +39,14 @@ export function App() {
     const key = (e: KeyboardEvent) => {
       if (e.altKey && /^Digit[1-4]$/.test(e.code)) { e.preventDefault(); setUi({ depth: +e.code.slice(5) }); return; }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setUi({ palette: S.palette ? null : "search" }); return; }
+      // inside a text field the browser's own text undo applies
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && !editing()) { e.preventDefault(); toast(undo() ? "Rückgängig gemacht." : "Nichts rückgängig zu machen."); return; }
       if (sheet || S.palette || editing() || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === "Escape") { e.preventDefault(); if (S.sel) setUi({ sel: null }); else if (root) up(); }
       else if (e.key === "n" || e.key === "N") { e.preventDefault(); setUi({ palette: "new" }); }
       else if (e.key === "f" || e.key === "F") { e.preventDefault(); nav({ f: !route.f, v: "outline" }); }
       else if (e.key === "i" || e.key === "I") { e.preventDefault(); setUi({ sel: S.sel ? null : root }); }
+      else if (e.key === "?") { e.preventDefault(); setHelp(true); }
       else if (KEYS[e.key]) { e.preventDefault(); nav({ v: KEYS[e.key], f: false }); }
     };
     // swipe from the left edge = one level up (iOS standalone has no back button)
@@ -117,8 +122,30 @@ export function App() {
     <RowMenu />
     {S.palette && <Palette t={t} root={root} />}
     {sheet && <Settings close={() => setSheet(false)} />}
+    {help && <Help close={() => setHelp(false)} />}
+    <TimerBar />
     <Toast />
   </div>;
+}
+
+const SHORTCUTS: [string, string][] = [
+  ["N", "Neu erfassen"], ["Strg+K", "Suchen, springen, anlegen"], ["Strg+Z", "Rückgängig"], ["?", "Diese Übersicht"],
+  ["O · H · B · M · R", "Gliederung · Heute · Board · Meetings · Rückblick"], ["F", "Fokusmodus"], ["I / Strg+I", "Details"],
+  ["Enter", "Neue Zeile"], ["Tab / Shift+Tab", "Ein-/Ausrücken"], ["Alt+↑ / Alt+↓", "Verschieben"], ["Strg+Enter", "Erledigt"],
+  ["Strg+.", "Hineinzoomen"], ["Esc", "Eine Ebene hoch"], ["Alt+1…4", "Detailtiefe"], ["Strg+/ · ⋯ · Rechtsklick", "Aktionen"],
+];
+function Help({ close }: { close: () => void }) {
+  return <>
+    <div class="scrim" onClick={close} />
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="Tastenkürzel" onKeyDown={e => e.key === "Escape" && close()}>
+      <h2>Tastenkürzel.</h2>
+      <dl class="keys">{SHORTCUTS.map(([k, d]) => <><dt class="mono">{k}</dt><dd>{d}</dd></>)}</dl>
+      <p class="label">Schnelleingabe</p>
+      <p class="mono hint">Text #projekt &gt;&gt;paket @wer bis fr ab mo ! ::note · jeden mo · werktags · täglich · monatlich</p>
+      <p class="hint">Ziehen am Punkt (●) verschiebt Zeilen: oben/unten = davor/danach, Mitte = hinein. Auf dem Handy: Wischen nach rechts = erledigt, nach links = später.</p>
+      <div class="grp"><button class="btn" onClick={close} autoFocus>Fertig</button></div>
+    </div>
+  </>;
 }
 
 function Sidebar({ t, active }: { t: Tree; active: string | null }) {

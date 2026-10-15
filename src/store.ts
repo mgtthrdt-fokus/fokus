@@ -3,7 +3,7 @@ import { INBOX, emptyFile, now, today, uid, type FNode, type FileV2, type NodeTy
 import { merge, normalize, serialize } from "./merge.ts";
 import { rankBetween } from "./rank.ts";
 import { buildTree, type Tree } from "./tree.ts";
-import { findProject, parseQuick } from "./parse.ts";
+import { findProject, nextDate, parseQuick } from "./parse.ts";
 import { decryptData, deriveKey, encryptData, openVault, type Vault } from "./vault.ts";
 
 export const REPO = { owner: "mgtthrdt", repo: "fokus-data", path: "data.json", branch: "main" };
@@ -54,7 +54,39 @@ export function useStore() {
 
 function saveLocal() { LS.set("fk2_data", S.file); LS.set("fk2_dirty", S.dirty); LS.set("fk2_sha", S.sha); dropV1(); }
 saveLocal();   // first v2 start: persist migrated v1 data, then drop the v1 keys
+/* ---------- undo: per user action, only the nodes it changed (never other devices' edits) ---------- */
+type Snap = Map<string, FNode | null>;   // id → node before the action; null = did not exist
+const undoStack: Snap[] = [];
+let group: Snap | null = null, restoring = false;
+function record(prev: FNode[], next: FNode[]) {
+  const before = new Map(prev.map(n => [n.id, n])), after = new Map(next.map(n => [n.id, n]));
+  const snap: Snap = group ?? new Map();
+  for (const [id, n] of before) if (after.get(id) !== n && !snap.has(id)) snap.set(id, n);   // nodes are replaced, never mutated
+  for (const id of after.keys()) if (!before.has(id) && !snap.has(id)) snap.set(id, null);
+  if (!group && snap.size) { undoStack.push(snap); if (undoStack.length > 50) undoStack.shift(); }
+}
+/** Several commits that the user sees as one action (done + next repeat, bulk moves) undo together. */
+export function batch(f: () => void) {
+  if (group) return f();
+  group = new Map();
+  try { f(); } finally { const g = group; group = null; if (g.size) undoStack.push(g); }
+}
+export const canUndo = () => undoStack.length > 0;
+export function undo(): boolean {
+  const snap = undoStack.pop(); if (!snap) return false;
+  const t = now(), deleted = { ...S.file.deleted };
+  // restored versions get a fresh `updated`, so they also win the merge against copies already synced
+  const back = [...snap.values()].filter((n): n is FNode => !!n).map(n => ({ ...n, updated: t }));
+  const ids = new Set(snap.keys());
+  for (const [id, n] of snap) if (n === null) deleted[id] = t;
+  for (const n of back) delete deleted[n.id];
+  restoring = true;
+  try { commit([...S.file.nodes.filter(n => !ids.has(n.id)), ...back], deleted); } finally { restoring = false; }
+  return true;
+}
+
 function commit(nodes: FNode[], deleted = S.file.deleted) {
+  if (!restoring) record(S.file.nodes, nodes);
   S.file = { schema: 2, nodes, deleted };
   tree = buildTree(nodes);
   S.dirty = true; saveLocal(); emit(); scheduleSync();
@@ -121,9 +153,15 @@ export function moveBy(id: string, dir: -1 | 1) {
   placeAt(id, n.parent, j);  // without n in the list, index j lands right before (up) / after (down) the neighbour
 }
 export function toggleDone(id: string) {
-  replace(id, n => n.status === "done"
-    ? { ...n, status: n.prev && n.prev !== "done" ? n.prev : "next", done: null }
-    : { ...n, prev: n.status ?? "next", status: "done", done: today() });
+  const n = tree.byId.get(id); if (!n) return;
+  setStatus(id, n.status === "done" ? (n.prev && n.prev !== "done" ? n.prev : "next") : "done");
+}
+/** Done on a recurring task: the done one keeps its history, a copy carries on with the next date. */
+function repeatNext(n: FNode) {
+  let due = nextDate(n.due ?? today(), n.repeat!);
+  while (due <= today()) due = nextDate(due, n.repeat!);   // done late: skip the missed dates, don't create an overdue copy
+  const { id: _i, created: _c, updated: _u, touched: _t, done: _d, prev: _p, act: _a, focus: _f, plan: _pl, ...keep } = n;
+  add(n.parent, n.id, { ...keep, status: n.prev && n.prev !== "done" && n.prev !== "now" ? n.prev : "next", due });
 }
 /** Quick-add. Target: >>paket under #projekt, else #projekt, else `fallback` (zoom root), else Eingang. */
 export function capture(text: string, fallback: string | null): string | null {
@@ -143,6 +181,7 @@ export function capture(text: string, fallback: string | null): string | null {
   const fields: Partial<FNode> = p.note ? { type: "note" } : {
     type: "task", status: p.status ?? (parent === INBOX ? "inbox" : "next"),
     ...(p.due ? { due: p.due } : {}), ...(p.start ? { start: p.start } : {}), ...(p.waitingOn ? { waitingOn: p.waitingOn } : {}),
+    ...(p.repeat ? { repeat: p.repeat, due: p.due ?? today() } : {}),
   };
   return add(parent, tree.kids(parent).at(-1)?.id ?? null, { title: p.title, ...fields });
 }
@@ -152,9 +191,22 @@ export function moveTo(id: string, parent: string | null) {
   placeAt(id, parent, tree.kids(parent).filter(s => s.id !== id).length);
 }
 export function setStatus(id: string, s: Status) {
-  replace(id, n => s === "done"
-    ? { ...n, prev: n.status === "done" ? n.prev : n.status ?? "next", status: "done", done: n.done ?? today() }
-    : { ...n, status: s, done: null });
+  const n = tree.byId.get(id); if (!n) return;
+  batch(() => {
+    if (s === "done") {
+      if (n.status === "done") return;
+      replace(id, x => ({ ...x, prev: x.status ?? "next", status: "done", done: today(), repeat: undefined }));
+      if (n.repeat) repeatNext({ ...n, prev: n.status });
+    } else replace(id, x => ({ ...x, status: s, done: null }));
+  });
+}
+/** Drag & drop in the outline: before / after a row, or as its last child. */
+export function moveRel(id: string, target: string, where: "before" | "after" | "inside") {
+  const t = tree.byId.get(target);
+  if (!t || isFixed(id) || id === target || tree.path(target).some(a => a.id === id)) return;
+  if (where === "inside") return moveTo(id, target);
+  const sibs = tree.kids(t.parent).filter(s => s.id !== id);
+  placeAt(id, t.parent, sibs.findIndex(s => s.id === target) + (where === "after" ? 1 : 0));
 }
 /** Removes the node and its whole subtree, with tombstones so the deletion syncs. */
 export function remove(id: string) {

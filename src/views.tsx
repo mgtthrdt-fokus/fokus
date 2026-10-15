@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import type { ComponentChildren } from "preact";
 import { INBOX, STATUSES, addDays, isActionable, isOpen, today, type FNode, type Status } from "./model.ts";
-import { S, add, capture, setStatus, setUi, update } from "./store.ts";
+import { S, add, batch, capture, setStatus, setUi, undo, update } from "./store.ts";
 import { Card, STATUS_NAME, Title, go } from "./Outline.tsx";
 import { DAY_HOURS, FOCUS_MAX, WEEK_MAX, ageDays, isFocus, reviewView, todayView } from "./today.ts";
 import { hours } from "./fmt.ts";
@@ -21,15 +21,88 @@ const List = ({ items, t, empty }: { items: FNode[]; t: Tree; empty?: string }) 
 async function copy(text: string) {
   try { await navigator.clipboard.writeText(text); toast("Kopiert."); } catch { prompt("Kopieren:", text); }
 }
-export let toast = (_: string) => {};
+/** toast("Gelöscht.", true) offers undo for a few seconds: undo instead of "are you sure?" dialogs. */
+export let toast = (_: string, _undoable = false) => {};
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
 export function Toast() {
-  const [m, set] = useState("");
-  toast = (x: string) => { set(x); setTimeout(() => set(""), 2000); };
-  return m ? <div class="toast" role="status">{m}</div> : null;
+  const [m, set] = useState<{ text: string; undo: boolean } | null>(null);
+  toast = (text, undoable = false) => { set({ text, undo: undoable }); clearTimeout(toastTimer); toastTimer = setTimeout(() => set(null), undoable ? 6000 : 2000); };
+  return m ? <div class="toast" role="status">{m.text}
+    {m.undo && <button class="link" onClick={() => { undo(); set(null); }}>Rückgängig</button>}</div> : null;
 }
 
-/* ---------- Heute (ignores zoom) ---------- */
+/* ---------- Heute (ignores zoom): list, or the day as time blocks ---------- */
 export function TodayView({ t }: { t: Tree }) {
+  const [mode, setMode] = useState(() => { try { return localStorage.getItem("fk2_today") || "list"; } catch { return "list"; } });
+  const pick = (m: string) => { setMode(m); try { localStorage.setItem("fk2_today", m); } catch { /* ignore */ } };
+  return <>
+    <div class="seg grp" role="tablist" aria-label="Darstellung">
+      <button role="tab" aria-selected={mode === "list"} aria-pressed={mode === "list"} onClick={() => pick("list")}>Liste</button>
+      <button role="tab" aria-selected={mode === "plan"} aria-pressed={mode === "plan"} onClick={() => pick("plan")}>Tagesplan</button>
+    </div>
+    {mode === "plan" ? <DayPlan t={t} /> : <TodayList t={t} />}
+  </>;
+}
+
+/* ---------- Tagesplan: time blocking (Newport) on 15-minute rows ---------- */
+const DAY_START = 7, DAY_END = 19, ROW = 15, ROW_PX = 14;
+const minOf = (plan: string) => +plan.slice(11, 13) * 60 + +plan.slice(14, 16);
+const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+const lenOf = (n: FNode) => Math.max(ROW, Math.round((Number(n.est) || 0.5) * 60 / ROW) * ROW);   // no estimate: 30 min
+
+function DayPlan({ t }: { t: Tree }) {
+  const day = today(), v = todayView(t), all = [...t.byId.values()];
+  const live = (n: FNode) => n.type === "meeting" || (isActionable(n) && isOpen(n));
+  const blocks = all.filter(n => n.plan?.startsWith(day) && live(n)).sort((a, b) => a.plan!.localeCompare(b.plan!));
+  const seen = new Set(blocks.map(n => n.id));
+  const cands = [...v.focus, ...v.overdue, ...v.soon, ...v.follow, ...all.filter(n => n.type === "meeting" && n.date === day), ...v.week]
+    .filter(n => !seen.has(n.id) && (seen.add(n.id), true));
+  const plan = (id: string, m: number) => update(id, { plan: `${day}T${hhmm(Math.max(DAY_START * 60, Math.min(m, DAY_END * 60 - ROW)))}` });
+  const hours = blocks.reduce((s, n) => s + lenOf(n), 0) / 60;
+  const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+  let lastEnd = 0;
+  return <>
+    <p class={"hint" + (hours > DAY_HOURS ? " w" : "")}>Geplant {String(Math.round(hours * 10) / 10).replace(".", ",")} h von {DAY_HOURS} h{hours > DAY_HOURS ? " ◇ überplant" : ""}. Ohne Schätzung zählt ein Block 30 min.</p>
+    <div class="dayplan">
+      <div class="grid" style={{ "--rows": (DAY_END - DAY_START) * 60 / ROW, "--rowpx": ROW_PX + "px" } as any}
+        onDragOver={e => e.preventDefault()}
+        onDrop={e => {
+          e.preventDefault();
+          const id = e.dataTransfer?.getData("text/plain"); if (!id || !t.byId.has(id)) return;
+          const y = e.clientY - e.currentTarget.getBoundingClientRect().top;
+          plan(id, DAY_START * 60 + Math.floor(y / ROW_PX) * ROW);
+        }}>
+        {Array.from({ length: DAY_END - DAY_START }, (_, h) => <span class="hr mono" style={{ gridRow: `${h * 4 + 1} / span 4` } as any}>{DAY_START + h}:00</span>)}
+        {nowMin > DAY_START * 60 && nowMin < DAY_END * 60 && <i class="now" style={{ top: (nowMin - DAY_START * 60) / ROW * ROW_PX + "px" }} aria-label={"Jetzt " + hhmm(nowMin)} />}
+        {blocks.map(n => {
+          const s = minOf(n.plan!), len = lenOf(n), clash = s < lastEnd;
+          lastEnd = Math.max(lastEnd, s + len);
+          const r0 = Math.max(0, (s - DAY_START * 60) / ROW);
+          return <div key={n.id} class={"block" + (clash ? " clash" : "")} data-t={n.type} draggable
+            onDragStart={e => e.dataTransfer?.setData("text/plain", n.id)}
+            style={{ gridRow: `${r0 + 1} / span ${Math.max(1, Math.min(len / ROW, (DAY_END * 60 - s) / ROW))}` } as any}>
+            <span class="mono">{hhmm(s)}–{hhmm(s + len)}</span>
+            <span class="bt">{n.type === "meeting" ? "▤ " : ""}{n.title || "Ohne Titel"}{clash ? " ◇ überschneidet" : ""}</span>
+            <span class="bacts">
+              {isActionable(n) && <button aria-label="Erledigt" onClick={() => setStatus(n.id, "done")}>✓</button>}
+              <button aria-label="Details" onClick={() => setUi({ sel: n.id })}>›</button>
+              <button aria-label="Aus dem Tagesplan nehmen" onClick={() => update(n.id, { plan: undefined })}>✕</button>
+            </span>
+          </div>;
+        })}
+      </div>
+      <aside class="cands">
+        <p class="label">Einplanen</p>
+        {cands.length ? <ul class="tree cards">{cands.map(n => <Card key={n.id} n={n} t={t} drag extra={
+          <input type="time" step={900} aria-label={"Uhrzeit für " + n.title} onChange={e => { const [h, m] = e.currentTarget.value.split(":"); if (h) plan(n.id, +h * 60 + +m); }} />} />)}</ul>
+          : <p class="empty">Alles eingeplant.</p>}
+        <p class="hint">Ziehen (PC) oder Uhrzeit wählen. Länge = Schätzung.</p>
+      </aside>
+    </div>
+  </>;
+}
+
+function TodayList({ t }: { t: Tree }) {
   const v = todayView(t), day = today();
   const [shut, setShut] = useState(false);
   let i = 0;
@@ -50,8 +123,8 @@ export function TodayView({ t }: { t: Tree }) {
         <button class="btn sec sm" onClick={() => copy(`Hallo ${n.waitingOn || ""}, kurze Nachfrage zu: ${n.title}. Gibt es einen Stand?`)}>Nachfassen</button>} />)}</ul>
     </Section>}
     {v.overdue.length > 0 && <Section i={++i} title="Überfällig" n={v.overdue.length} warn actions={<>
-      <button class="btn sec sm" onClick={() => v.overdue.forEach(n => update(n.id, { due: addDays(day, 1) }))}>Alle auf morgen</button>
-      <button class="btn sec sm" onClick={() => v.overdue.forEach(n => update(n.id, { status: "later", due: null }))}>Alle nach Später</button></>}>
+      <button class="btn sec sm" onClick={() => { batch(() => v.overdue.forEach(n => update(n.id, { due: addDays(day, 1) }))); toast(`${v.overdue.length} auf morgen verschoben.`, true); }}>Alle auf morgen</button>
+      <button class="btn sec sm" onClick={() => { batch(() => v.overdue.forEach(n => update(n.id, { status: "later", due: null }))); toast(`${v.overdue.length} nach Später.`, true); }}>Alle nach Später</button></>}>
       <List items={v.overdue} t={t} />
     </Section>}
     {v.soon.length > 0 && <Section i={++i} title="Heute und morgen fällig" n={v.soon.length}><List items={v.soon} t={t} /></Section>}
@@ -215,6 +288,14 @@ export function ReviewView({ t }: { t: Tree }) {
       <ul class="tree plain">{r.holding.map(n => <li key={n.id} class="row"><span class="body">
         <button class="link" onClick={() => go(n.id)}>{n.title}</button>
         <span class="chips"><button onClick={() => update(n.id, { state: "active" })}>▶ wieder aktiv</button></span></span></li>)}</ul></Section>}
+    {(() => {   // reference-class forecasting: your own past ratio beats a fresh guess (planning fallacy)
+      const xs = [...t.byId.values()].filter(n => n.status === "done" && Number(n.est) > 0 && Number(n.act) > 0);
+      if (xs.length < 3) return null;
+      const f = xs.reduce((s, n) => s + Number(n.act), 0) / xs.reduce((s, n) => s + Number(n.est), 0);
+      return <Section i={++i} title="Schätzgenauigkeit" n={xs.length}>
+        <p class="hint">Tatsächlich brauchst du etwa das <b>{String(Math.round(f * 10) / 10).replace(".", ",")}-fache</b> deiner Schätzung (aus {xs.length} erledigten Aufgaben mit Timer).</p>
+      </Section>;
+    })()}
     <Section i={++i} title="Erledigt diese Woche" n={r.doneWeek.length}><List items={r.doneWeek} t={t} empty="Noch nichts." /></Section>
   </>;
 }

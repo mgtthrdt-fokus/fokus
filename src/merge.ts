@@ -1,4 +1,4 @@
-import { INBOX, STATUSES, emptyFile, now, ts, type FNode, type FileV2 } from "./model.ts";
+import { INBOX, REPEATS, STATUSES, emptyFile, now, ts, type FNode, type FileV2 } from "./model.ts";
 import { migrate, type AreaMap } from "./migrate.ts";
 
 const TYPES = ["area", "project", "package", "task", "note", "meeting", "system"];
@@ -17,6 +17,10 @@ function clean(n: any): FNode {
   if (o.priority != null && ![1, 2, 3].includes(o.priority)) delete o.priority;
   if (o.state != null && o.state !== "active" && o.state !== "holding") delete o.state;
   if (o.color != null && !/^#[0-9a-f]{3,8}$/i.test(o.color)) delete o.color;
+  if (o.repeat != null && !REPEATS.includes(o.repeat)) delete o.repeat;
+  if (o.plan != null && !(typeof o.plan === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(o.plan))) delete o.plan;
+  // rendered as a link: only Obsidian's own scheme, never javascript: or http(s) from untrusted data
+  if (o.obsidian != null && !(typeof o.obsidian === "string" && /^obsidian:\/\/open\?/.test(o.obsidian))) delete o.obsidian;
   for (const k of ["archived", "proposed"]) if (o[k] != null && typeof o[k] !== "boolean") o[k] = !!o[k];
   for (const k of ["created", "updated", "touched"]) {
     if (k === "touched" && o[k] == null) continue;
