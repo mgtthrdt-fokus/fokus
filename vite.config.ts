@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 
 const { version } = JSON.parse(readFileSync("package.json", "utf8"));
 
-// Origin mgtthrdt.github.io is shared with other apps: no inline script, network only to GitHub API.
+// Strict CSP: no inline script, network only to the GitHub API.
 // Build only, because the dev server injects inline HMR scripts.
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; " +
   "connect-src 'self' https://api.github.com; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'";

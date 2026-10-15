@@ -1,5 +1,5 @@
 // Service worker: cache-first with background refresh (v1 pattern).
-// CacheStorage is shared by the whole origin mgtthrdt.github.io (Satzbuch, W&B, Checklisten),
+// Own origin mgtthrdt-fokus.github.io; the "fokus-" prefix still keeps other caches safe if that ever changes,
 // so only touch caches with the "fokus-" prefix. GitHub API calls never go through the cache.
 const PREFIX = "fokus-";
 const CACHE = PREFIX + (new URL(location.href).searchParams.get("v") || "dev");
