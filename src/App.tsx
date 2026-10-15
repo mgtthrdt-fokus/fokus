@@ -142,15 +142,21 @@ function Sidebar({ t, active }: { t: Tree; active: string | null }) {
 const typeName: Record<string, string> = { area: "Bereich", project: "Projekt", package: "Arbeitspaket", task: "Aufgabe", note: "Notiz", meeting: "Meeting", system: "Eingang" };
 
 function Unlock() {
-  const [pass, setPass] = useState(""), [remember, setRemember] = useState(true), [busy, setBusy] = useState(false), [err, setErr] = useState("");
+  const [pass, setPass] = useState(""), [remember, setRemember] = useState(true), [busy, setBusy] = useState(false), [err, setErr] = useState(""), [show, setShow] = useState(false);
   const submit = async (e: Event) => {
     e.preventDefault(); setBusy(true); setErr("");
-    if (!(await unlock(pass, remember))) setErr("Passphrase stimmt nicht.");
-    setBusy(false); setPass("");
+    try {
+      // keep the input on failure, so it can be revealed and compared; the length hints at a typo without showing it
+      if (await unlock(pass, remember)) setPass("");
+      else setErr(`Passphrase stimmt nicht (${pass.trim().length} Zeichen eingegeben). Groß-/Kleinschreibung, Ziffern und Bindestriche prüfen, oder aus dem Passwort-Manager einfügen.`);
+    } catch (x: any) { setErr("Entsperren fehlgeschlagen: " + (x?.message || x)); }
+    setBusy(false);
   };
   return <form class="banner" onSubmit={submit}>
     <label class="field"><span class="label">Entsperren</span>
-      <input type="password" value={pass} onInput={e => setPass(e.currentTarget.value)} autocomplete="current-password" placeholder="Fokus-Passphrase" autoFocus /></label>
+      <input type={show ? "text" : "password"} value={pass} onInput={e => setPass(e.currentTarget.value)} autocomplete="current-password" placeholder="Fokus-Passphrase" autoFocus
+        autocapitalize="off" autocorrect="off" spellcheck={false} /></label>
+    <button type="button" class="btn sec sm" aria-pressed={show} onClick={() => setShow(!show)}>{show ? "Verbergen" : "Anzeigen"}</button>
     <label class="chk"><input type="checkbox" checked={remember} onChange={e => setRemember(e.currentTarget.checked)} /> Auf diesem Gerät merken</label>
     <button class="btn" disabled={busy || !pass}>{busy ? "Prüfe…" : "Entsperren"}</button>
     {err && <p class="err" role="alert">{err}</p>}
